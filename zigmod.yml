@@ -3,3 +3,4 @@ name: padwm
 license: mit
 description: none
 root_dependencies:
+    - src: git https://github.com/marlersoft/zigwin32
