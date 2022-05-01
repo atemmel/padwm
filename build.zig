@@ -13,10 +13,13 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
+    //const lib = b.addStaticLibrary("dwmapi.lib", null);
+
     const exe = b.addExecutable("padwm", "src/main.zig");
     deps.addAllTo(exe);
     exe.setTarget(target);
     exe.setBuildMode(mode);
+    //exe.linkLibrary(lib);
     exe.install();
 
     const run_cmd = exe.run();

@@ -18,6 +18,7 @@ const DispatchMessage = wam.DispatchMessage;
 const GetLastError = windows.kernel32.GetLastError;
 const assert = std.debug.assert;
 const info = std.log.info;
+const print = std.debug.print;
 const u16Literal = std.unicode.utf8ToUtf16LeStringLiteral;
 
 const TITLE = "padwm";
@@ -77,6 +78,7 @@ fn shouldManage(hwnd: HWND) bool {
     _ = wam.GetClassNameW(hwnd, &class_buffer, class_buffer.len);
     const class = &class_buffer;
 
+    @setEvalBranchQuota(10_000);
     const ignore_title = [_][:0] const u16{
         u16Literal("Windows.UI.Core.CoreWindow"),
         u16Literal("Windows Shell Experience Host"),
@@ -101,21 +103,24 @@ fn shouldManage(hwnd: HWND) bool {
     };
 
     for(ignore_title) |str| {
-        if(std.mem.eql([:0]u16, title, str)) {
+        if(std.mem.eql(u16, title, str)) {
             return false;
         }
     }
 
     for(ignore_class) |str| {
-        if(std.mem.eql([:0]u16, class, str)) {
+        if(std.mem.eql(u16, class, str)) {
             return false;
         }
     }
 
+    //TODO: this
+    print("Not handling: {u}\n", .{title[0..10].*});
     return false;
 }
 
 fn manage(hwnd: HWND) void {
+    info("Managing", .{});
     _ = hwnd;
 }
 
@@ -195,13 +200,13 @@ pub fn wWinMain(h_instance_param: windows.HINSTANCE, _: ?windows.HINSTANCE, _: [
     _ = h_instance_param;
     const gpa = std.heap.GeneralPurposeAllocator(.{});
     var alloc = gpa{};
-    defer std.debug.assert(alloc.deinit());
+    defer std.debug.assert(!alloc.deinit());
     const h_instance = @ptrCast(HINSTANCE, h_instance_param);
     init(h_instance, alloc.allocator());
-    //var msg = std.mem.zeroes(wam.MSG);
-    //while (GetMessage(&msg, null, 0, 0) > 0) {
-    //_ = TranslateMessage(&msg);
-    //_ = DispatchMessage(&msg);
-    //}
-    return 0;
+    var msg = std.mem.zeroes(wam.MSG);
+    while (GetMessage(&msg, null, 0, 0) > 0) {
+        _ = TranslateMessage(&msg);
+        _ = DispatchMessage(&msg);
+    }
+    return @intCast(c_int, msg.wParam);
 }
