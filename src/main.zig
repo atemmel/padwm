@@ -26,17 +26,18 @@ const WTITLE = u16Literal(TITLE);
 
 const Client = struct {
     hwnd: HWND,
-    parent: HWND,
+    parent: ?HWND,
     root: HWND,
     isAlive: bool,
+    isCloaked: bool,
 };
 
 const Clients = std.ArrayList(Client);
 var clients: Clients = undefined;
 
 fn findClient(hwnd: HWND) ?*Client {
-    for(clients.items) |*client| {
-        if(client.hwnd == hwnd) {
+    for (clients.items) |*client| {
+        if (client.hwnd == hwnd) {
             return client;
         }
     }
@@ -44,8 +45,7 @@ fn findClient(hwnd: HWND) ?*Client {
 }
 
 fn shouldManage(hwnd: HWND) bool {
-
-    if(findClient(hwnd)) |_| {
+    if (findClient(hwnd)) |_| {
         return true;
     }
 
@@ -62,24 +62,24 @@ fn shouldManage(hwnd: HWND) bool {
     _ = is_app;
     _ = is_tool;
 
-    if(parent_ok and findClient(parent.?) == null) {
+    if (parent_ok and findClient(parent.?) == null) {
         manage(parent.?);
     }
 
-    if(disabled or no_activate or isCloaked(hwnd)) {
+    if (disabled or no_activate or isCloaked(hwnd)) {
         return false;
     }
 
-    var title_buffer: [512:0] u16 = undefined;
-    _ = wam.GetWindowTextW(hwnd, &title_buffer, title_buffer.len);
-    const title = &title_buffer;
+    var title_buffer: [512:0]u16 = undefined;
+    const title_len = @intCast(usize, wam.GetWindowTextW(hwnd, &title_buffer, title_buffer.len));
+    const title = title_buffer[0..title_len];
 
-    var class_buffer: [512:0] u16 = undefined;
+    var class_buffer: [512:0]u16 = undefined;
     _ = wam.GetClassNameW(hwnd, &class_buffer, class_buffer.len);
     const class = &class_buffer;
 
     @setEvalBranchQuota(10_000);
-    const ignore_title = [_][:0] const u16{
+    const ignore_title = [_][:0]const u16{
         u16Literal("Windows.UI.Core.CoreWindow"),
         u16Literal("Windows Shell Experience Host"),
         u16Literal("Microsoft Text Input Application"),
@@ -94,7 +94,7 @@ fn shouldManage(hwnd: HWND) bool {
         u16Literal("Search"),
     };
 
-    const ignore_class = [_][:0] const u16 {
+    const ignore_class = [_][:0]const u16{
         u16Literal("ForegroundStaging"),
         u16Literal("ApplicationManager_DesktopShellWindow"),
         u16Literal("Static"),
@@ -102,35 +102,82 @@ fn shouldManage(hwnd: HWND) bool {
         u16Literal("Progman"),
     };
 
-    for(ignore_title) |str| {
-        if(std.mem.eql(u16, title, str)) {
+    for (ignore_title) |str| {
+        if (std.mem.eql(u16, title, str)) {
+            print("Not handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
             return false;
         }
     }
 
-    for(ignore_class) |str| {
-        if(std.mem.eql(u16, class, str)) {
+    for (ignore_class) |str| {
+        if (std.mem.eql(u16, class, str)) {
+            print("Not handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
             return false;
         }
     }
 
-    //TODO: this
-    print("Not handling: {u}\n", .{title[0..10].*});
+    if ((parent == null and wam.IsWindowVisible(hwnd) != 0) or parent_ok) {
+        if ((!is_tool and parent == null) or (is_tool and parent_ok)) {
+            print("Handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
+            return true;
+        }
+        if (is_app and parent != null) {
+            print("Handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
+            return true;
+        }
+    }
+
+    print("Not handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
     return false;
 }
 
 fn manage(hwnd: HWND) void {
+    if (findClient(hwnd)) |_| {
+        return;
+    }
+
     info("Managing", .{});
-    _ = hwnd;
+    var wi: wam.WINDOWINFO = undefined;
+    wi.cbSize = @sizeOf(wam.WINDOWINFO);
+
+    if (wam.GetWindowInfo(hwnd, &wi) == 0) {
+        return;
+    }
+
+    var client = Client{
+        .hwnd = hwnd,
+        .parent = wam.GetParent(hwnd),
+        .root = getRoot(hwnd),
+        .isAlive = true,
+        .isCloaked = isCloaked(hwnd),
+    };
+
+    clients.append(client) catch {
+        @panic("Unable to allocate memory for new client");
+    };
+}
+
+fn getRoot(hwnd: HWND) HWND {
+    var root = hwnd;
+    var parent: ?HWND = undefined;
+    const desktop = wam.GetDesktopWindow() orelse @panic("Unable to get desktop window");
+
+    parent = wam.GetWindow(root, wam.GW_OWNER);
+    while (parent != null and desktop != parent.?) {
+        root = parent.?;
+        parent = wam.GetWindow(root, wam.GW_OWNER);
+    }
+
+    return root;
 }
 
 fn isCloaked(hwnd: HWND) bool {
     var value: i32 = undefined;
     const h_res = binding.DwmGetWindowAttribute(hwnd, binding.DWMA_CLOAKED, &value, @sizeOf(i32));
-    if(h_res != 0) {
+    if (h_res != 0) {
         value = 0;
     }
-    return if(value == 0) false else true;
+    return if (value == 0) false else true;
 }
 
 fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C) LRESULT {
@@ -144,9 +191,9 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
 
 fn enumWndProc(hwnd: HWND, lparam: LPARAM) callconv(.C) BOOL {
     _ = lparam;
-    if(findClient(hwnd)) |client| {
+    if (findClient(hwnd)) |client| {
         client.isAlive = true;
-    } else if(shouldManage(hwnd)) {
+    } else if (shouldManage(hwnd)) {
         manage(hwnd);
     }
     return 1;
