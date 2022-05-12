@@ -3,6 +3,7 @@ const win32 = @import("win32");
 const binding = @import("binding.zig");
 const windows = std.os.windows;
 const wam = win32.ui.windows_and_messaging;
+const kbm = win32.ui.input.keyboard_and_mouse;
 const threading = win32.system.threading;
 const foundation = win32.foundation;
 const HINSTANCE = foundation.HINSTANCE;
@@ -34,6 +35,7 @@ const Client = struct {
 
 const Clients = std.ArrayList(Client);
 var clients: Clients = undefined;
+var running = true;
 
 fn findClient(hwnd: HWND) ?*Client {
     for (clients.items) |*client| {
@@ -177,20 +179,24 @@ fn isCloaked(hwnd: HWND) bool {
     if (h_res != 0) {
         value = 0;
     }
-    return if (value == 0) false else true;
+    return value == 0;
 }
 
 fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C) LRESULT {
     switch (msg) {
+        wam.WM_HOTKEY => {
+            if (wparam == 0) {
+                running = false;
+            }
+        },
         else => {
             return wam.DefWindowProcW(hwnd, msg, wparam, lparam);
         },
     }
-    unreachable;
+    return 0;
 }
 
-fn enumWndProc(hwnd: HWND, lparam: LPARAM) callconv(.C) BOOL {
-    _ = lparam;
+fn enumWndProc(hwnd: HWND, _: LPARAM) callconv(.C) BOOL {
     if (findClient(hwnd)) |client| {
         client.isAlive = true;
     } else if (shouldManage(hwnd)) {
@@ -241,6 +247,15 @@ fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
     info("Window created", .{});
 
     _ = wam.EnumWindows(enumWndProc, 0);
+
+    if (kbm.RegisterHotKey(
+        wmhwnd, // hwnd
+        0, // id
+        kbm.HOT_KEY_MODIFIERS.ALT, // mod
+        'E', // key
+    ) == 0) {
+        @panic("Unable to bind exit key");
+    }
 }
 
 pub fn wWinMain(h_instance_param: windows.HINSTANCE, _: ?windows.HINSTANCE, _: [*:0]const u16, _: i32) c_int {
@@ -251,7 +266,7 @@ pub fn wWinMain(h_instance_param: windows.HINSTANCE, _: ?windows.HINSTANCE, _: [
     const h_instance = @ptrCast(HINSTANCE, h_instance_param);
     init(h_instance, alloc.allocator());
     var msg = std.mem.zeroes(wam.MSG);
-    while (GetMessage(&msg, null, 0, 0) > 0) {
+    while (running and GetMessage(&msg, null, 0, 0) > 0) {
         _ = TranslateMessage(&msg);
         _ = DispatchMessage(&msg);
     }
