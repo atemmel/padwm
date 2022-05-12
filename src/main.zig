@@ -205,6 +205,27 @@ fn enumWndProc(hwnd: HWND, _: LPARAM) callconv(.C) BOOL {
     return 1;
 }
 
+fn setVisibility(hwnd: HWND, visible: bool) void {
+    const i_visible = @boolToInt(visible);
+    const i_hide = @boolToInt(!visible);
+    _ = wam.SetWindowPos(
+        hwnd,
+        null,
+        0,
+        0,
+        0,
+        0,
+        wam.SET_WINDOW_POS_FLAGS.initFlags(.{
+            .NOACTIVATE = 1,
+            .NOMOVE = 1,
+            .NOSIZE = 1,
+            .NOZORDER = 1,
+            .SHOWWINDOW = i_visible,
+            .HIDEWINDOW = i_hide,
+        }),
+    );
+}
+
 fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
     clients = Clients.init(alloc);
     _ = wam.SetProcessDPIAware();
@@ -213,6 +234,11 @@ fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
     assert(mutex != null);
     if (GetLastError() == windows.Win32Error.ALREADY_EXISTS) {
         @panic(TITLE ++ " is already running.");
+    }
+
+    const tray = wam.FindWindowW(u16Literal("Shell_TrayWnd"), null);
+    if (tray != null) {
+        setVisibility(tray.?, false);
     }
 
     const class_style = std.mem.zeroes(wam.WNDCLASS_STYLES);
@@ -258,17 +284,25 @@ fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
     }
 }
 
+fn deinit() void {
+    defer clients.deinit();
+    const tray = wam.FindWindowW(u16Literal("Shell_TrayWnd"), null);
+    if (tray != null) {
+        setVisibility(tray.?, true);
+    }
+}
+
 pub fn wWinMain(h_instance_param: windows.HINSTANCE, _: ?windows.HINSTANCE, _: [*:0]const u16, _: i32) c_int {
     _ = h_instance_param;
-    const gpa = std.heap.GeneralPurposeAllocator(.{});
-    var alloc = gpa{};
-    defer std.debug.assert(!alloc.deinit());
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(!gpa.deinit());
     const h_instance = @ptrCast(HINSTANCE, h_instance_param);
-    init(h_instance, alloc.allocator());
+    init(h_instance, gpa.allocator());
     var msg = std.mem.zeroes(wam.MSG);
     while (running and GetMessage(&msg, null, 0, 0) > 0) {
         _ = TranslateMessage(&msg);
         _ = DispatchMessage(&msg);
     }
+    deinit();
     return @intCast(c_int, msg.wParam);
 }
