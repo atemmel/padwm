@@ -36,10 +36,14 @@ const Client = struct {
 const Clients = std.ArrayList(Client);
 var clients: Clients = undefined;
 var running = true;
+var shellHookId: u32 = 0;
 
-fn findClient(hwnd: HWND) ?*Client {
+fn findClient(hwnd: ?HWND) ?*Client {
+    if (hwnd == null) {
+        return null;
+    }
     for (clients.items) |*client| {
-        if (client.hwnd == hwnd) {
+        if (client.hwnd == hwnd.?) {
             return client;
         }
     }
@@ -68,7 +72,8 @@ fn shouldManage(hwnd: HWND) bool {
         manage(parent.?);
     }
 
-    if (disabled or no_activate or isCloaked(hwnd)) {
+    const is_cloaked = isCloaked(hwnd);
+    if (disabled or no_activate or is_cloaked) {
         return false;
     }
 
@@ -106,34 +111,35 @@ fn shouldManage(hwnd: HWND) bool {
 
     for (ignore_title) |str| {
         if (std.mem.eql(u16, title, str)) {
-            print("Not handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
+            //print("Not handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
             return false;
         }
     }
 
     for (ignore_class) |str| {
         if (std.mem.eql(u16, class, str)) {
-            print("Not handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
+            //print("Not handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
             return false;
         }
     }
 
     if ((parent == null and wam.IsWindowVisible(hwnd) != 0) or parent_ok) {
         if ((!is_tool and parent == null) or (is_tool and parent_ok)) {
-            print("Handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
+            //print("Handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
             return true;
         }
         if (is_app and parent != null) {
-            print("Handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
+            //print("Handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
             return true;
         }
     }
 
-    print("Not handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
+    //print("Not handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
     return false;
 }
 
 fn manage(hwnd: HWND) void {
+    print("Managing...\n", .{});
     if (findClient(hwnd)) |_| {
         return;
     }
@@ -179,7 +185,7 @@ fn isCloaked(hwnd: HWND) bool {
     if (h_res != 0) {
         value = 0;
     }
-    return value == 0;
+    return value != 0;
 }
 
 fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C) LRESULT {
@@ -190,7 +196,24 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
             }
         },
         else => {
-            return wam.DefWindowProcW(hwnd, msg, wparam, lparam);
+            if (msg == shellHookId) {
+                const client_hwnd = @intToPtr(?HWND, @intCast(usize, lparam));
+                const client = findClient(client_hwnd);
+                switch (wparam & 0x7FFF) {
+                    wam.HSHELL_WINDOWCREATED => {
+                        print("Window created\n", .{});
+                        if (client == null and shouldManage(client_hwnd.?)) {
+                            print("Managing...", .{});
+                            manage(client_hwnd.?);
+                        } else {
+                            print("Did not manage!\n", .{});
+                        }
+                    },
+                    else => {},
+                }
+            } else {
+                return wam.DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
         },
     }
     return 0;
@@ -282,6 +305,12 @@ fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
     ) == 0) {
         @panic("Unable to bind exit key");
     }
+
+    if (wam.RegisterShellHookWindow(wmhwnd) == 0) {
+        @panic("Could not RegisterShellHookWindow");
+    }
+
+    shellHookId = wam.RegisterWindowMessageW(u16Literal("SHELLHOOK"));
 }
 
 fn deinit() void {
