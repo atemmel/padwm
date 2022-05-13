@@ -18,6 +18,7 @@ pub fn build(b: *std.build.Builder) void {
     const exe = b.addExecutable("padwm", "src/main.zig");
     deps.addAllTo(exe);
     exe.setTarget(target);
+    exe.subsystem = .Windows;
     exe.setBuildMode(mode);
     //exe.linkLibrary(lib);
     exe.install();

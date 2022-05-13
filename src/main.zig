@@ -7,6 +7,7 @@ const kbm = win32.ui.input.keyboard_and_mouse;
 const threading = win32.system.threading;
 const foundation = win32.foundation;
 const HINSTANCE = foundation.HINSTANCE;
+const RECT = foundation.RECT;
 const HWND = foundation.HWND;
 const WPARAM = foundation.WPARAM;
 const LPARAM = foundation.LPARAM;
@@ -25,18 +26,164 @@ const u16Literal = std.unicode.utf8ToUtf16LeStringLiteral;
 const TITLE = "padwm";
 const WTITLE = u16Literal(TITLE);
 
+const KeyBind = struct {
+    key: u32,
+    extraMod: u32,
+    action: []const u8,
+    arg: []const u8,
+
+    fn init(key: kbm.VIRTUAL_KEY, action: []const u8, arg: []const u8) KeyBind {
+        return KeyBind{
+            .key = @enumToInt(key),
+            .extraMod = 0,
+            .action = action,
+            .arg = arg,
+        };
+    }
+
+    fn initMod(key: kbm.VIRTUAL_KEY, mod: kbm.HOT_KEY_MODIFIERS, action: []const u8, arg: []const u8) KeyBind {
+        return KeyBind{
+            .key = @enumToInt(key),
+            .extraMod = @enumToInt(mod),
+            .action = action,
+            .arg = arg,
+        };
+    }
+};
+
+const modifier = kbm.HOT_KEY_MODIFIERS.ALT;
+
+const binds = [_]KeyBind{
+    KeyBind.initMod(kbm.VK_E, kbm.MOD_SHIFT, "exit", ""),
+
+    KeyBind.init(kbm.VK_H, "walk", "left"),
+    KeyBind.init(kbm.VK_L, "walk", "right"),
+    KeyBind.init(kbm.VK_K, "walk", "up"),
+    KeyBind.init(kbm.VK_J, "walk", "down"),
+};
+
 const Client = struct {
     hwnd: HWND,
     parent: ?HWND,
     root: HWND,
     isAlive: bool,
     isCloaked: bool,
+    workspace: Workspace,
+
+    fn resize(self: *Client, x: i32, y: i32, w: i32, h: i32) void {
+        _ = wam.SetWindowPos(self.hwnd, null, x, y, w, h, wam.SWP_NOACTIVATE);
+    }
+
+    fn setVisibility(self: *Client, visible: bool) void {
+        setHwndVisibility(self.hwnd, visible);
+    }
 };
 
 const Clients = std.ArrayList(Client);
 var clients: Clients = undefined;
 var running = true;
 var shellHookId: u32 = 0;
+
+var desktop_x: i32 = 0;
+var desktop_y: i32 = 0;
+var desktop_width: i32 = 0;
+var desktop_height: i32 = 0;
+
+const Workspace = enum(u8) {
+    center,
+    west,
+    east,
+    north,
+    south,
+    _,
+};
+
+const Direction = enum(u8) {
+    left,
+    right,
+    up,
+    down,
+    _,
+};
+
+var active_workspace = Workspace.center;
+
+fn updateGeometry() void {
+    desktop_x = binding.GetSystemMetrics(binding.SM_XVIRTUALSCREEN);
+    desktop_y = binding.GetSystemMetrics(binding.SM_YVIRTUALSCREEN);
+    desktop_width = binding.GetSystemMetrics(binding.SM_CXVIRTUALSCREEN);
+    desktop_height = binding.GetSystemMetrics(binding.SM_CYVIRTUALSCREEN);
+}
+
+fn lookupWorkspace(dir: Direction) Workspace {
+    const workspace_jump_table = [5][4]Workspace{
+        // Direction: left            right           up               down               // Destination:
+        [_]Workspace{ Workspace.west, Workspace.east, Workspace.north, Workspace.south }, // center
+        [_]Workspace{ Workspace.east, Workspace.center, Workspace.north, Workspace.south }, // west
+        [_]Workspace{ Workspace.center, Workspace.west, Workspace.north, Workspace.south }, // east
+        [_]Workspace{ Workspace.west, Workspace.east, Workspace.south, Workspace.north }, // north
+        [_]Workspace{ Workspace.west, Workspace.east, Workspace.center, Workspace.north }, // south
+    };
+
+    const i = @enumToInt(active_workspace);
+    const j = @enumToInt(dir);
+    return workspace_jump_table[i][j];
+}
+
+fn changeWorkspace(ws: Workspace) void {
+    for (clients.items) |*client| {
+        if (client.workspace == active_workspace) {
+            client.setVisibility(false);
+        }
+    }
+
+    active_workspace = ws;
+
+    for (clients.items) |*client| {
+        if (client.workspace == active_workspace) {
+            client.setVisibility(true);
+        }
+    }
+
+    focusPrev();
+}
+
+fn focusPrev() void {
+    var i: usize = clients.items.len - 1;
+    while (true) {
+        const client = &clients.items[i];
+        if (client.workspace == active_workspace) {
+            focus(client);
+            return;
+        }
+        if (i == 0) {
+            break;
+        }
+        i -= 1;
+    }
+    focus(null);
+}
+
+fn focusNext() void {
+    var i: usize = 0;
+    while (i < clients.items.len) {
+        const client = &clients.items[i];
+        if (client.workspace == active_workspace) {
+            focus(client);
+            return;
+        }
+        i += 1;
+    }
+    focus(null);
+}
+
+fn focus(client: ?*const Client) void {
+    if (client == null) {
+        _ = wam.SetForegroundWindow(null);
+    } else {
+        _ = wam.SetForegroundWindow(client.?.hwnd);
+    }
+}
 
 fn findClient(hwnd: ?HWND) ?*Client {
     if (hwnd == null) {
@@ -48,6 +195,27 @@ fn findClient(hwnd: ?HWND) ?*Client {
         }
     }
     return null;
+}
+
+fn setHwndVisibility(hwnd: HWND, visible: bool) void {
+    const i_visible = @boolToInt(visible);
+    const i_hide = @boolToInt(!visible);
+    _ = wam.SetWindowPos(
+        hwnd,
+        null,
+        0,
+        0,
+        0,
+        0,
+        wam.SET_WINDOW_POS_FLAGS.initFlags(.{
+            .NOACTIVATE = 1,
+            .NOMOVE = 1,
+            .NOSIZE = 1,
+            .NOZORDER = 1,
+            .SHOWWINDOW = i_visible,
+            .HIDEWINDOW = i_hide,
+        }),
+    );
 }
 
 fn shouldManage(hwnd: HWND) bool {
@@ -82,8 +250,8 @@ fn shouldManage(hwnd: HWND) bool {
     const title = title_buffer[0..title_len];
 
     var class_buffer: [512:0]u16 = undefined;
-    _ = wam.GetClassNameW(hwnd, &class_buffer, class_buffer.len);
-    const class = &class_buffer;
+    const class_len = @intCast(usize, wam.GetClassNameW(hwnd, &class_buffer, class_buffer.len));
+    const class = class_buffer[0..class_len];
 
     @setEvalBranchQuota(10_000);
     const ignore_title = [_][:0]const u16{
@@ -125,11 +293,11 @@ fn shouldManage(hwnd: HWND) bool {
 
     if ((parent == null and wam.IsWindowVisible(hwnd) != 0) or parent_ok) {
         if ((!is_tool and parent == null) or (is_tool and parent_ok)) {
-            //print("Handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
+            print("Handling: {s} {s}\n", .{ std.unicode.fmtUtf16le(title), std.unicode.fmtUtf16le(class) });
             return true;
         }
         if (is_app and parent != null) {
-            //print("Handling: {s}\n", .{std.unicode.fmtUtf16le(title)});
+            print("Handling: {s} {s}\n", .{ std.unicode.fmtUtf16le(title), std.unicode.fmtUtf16le(class) });
             return true;
         }
     }
@@ -139,12 +307,10 @@ fn shouldManage(hwnd: HWND) bool {
 }
 
 fn manage(hwnd: HWND) void {
-    print("Managing...\n", .{});
     if (findClient(hwnd)) |_| {
         return;
     }
 
-    info("Managing", .{});
     var wi: wam.WINDOWINFO = undefined;
     wi.cbSize = @sizeOf(wam.WINDOWINFO);
 
@@ -158,6 +324,7 @@ fn manage(hwnd: HWND) void {
         .root = getRoot(hwnd),
         .isAlive = true,
         .isCloaked = isCloaked(hwnd),
+        .workspace = active_workspace,
     };
 
     clients.append(client) catch {
@@ -191,8 +358,17 @@ fn isCloaked(hwnd: HWND) bool {
 fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C) LRESULT {
     switch (msg) {
         wam.WM_HOTKEY => {
-            if (wparam == 0) {
-                running = false;
+            if (wparam >= 0 and wparam < binds.len) {
+                const bind = binds[wparam];
+                if (std.mem.eql(u8, bind.action, "exit")) {
+                    print("Exiting...\n", .{});
+                    running = false;
+                } else if (std.mem.eql(u8, bind.action, "walk")) {
+                    if (std.meta.stringToEnum(Direction, bind.arg)) |direction| {
+                        const next_workspace = lookupWorkspace(direction);
+                        changeWorkspace(next_workspace);
+                    }
+                }
             }
         },
         else => {
@@ -205,6 +381,8 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                         if (client == null and shouldManage(client_hwnd.?)) {
                             print("Managing...", .{});
                             manage(client_hwnd.?);
+                            var n_client = clients.items[clients.items.len - 1];
+                            n_client.resize(0, 0, desktop_width, desktop_height);
                         } else {
                             print("Did not manage!\n", .{});
                         }
@@ -228,25 +406,18 @@ fn enumWndProc(hwnd: HWND, _: LPARAM) callconv(.C) BOOL {
     return 1;
 }
 
-fn setVisibility(hwnd: HWND, visible: bool) void {
-    const i_visible = @boolToInt(visible);
-    const i_hide = @boolToInt(!visible);
-    _ = wam.SetWindowPos(
-        hwnd,
-        null,
-        0,
-        0,
-        0,
-        0,
-        wam.SET_WINDOW_POS_FLAGS.initFlags(.{
-            .NOACTIVATE = 1,
-            .NOMOVE = 1,
-            .NOSIZE = 1,
-            .NOZORDER = 1,
-            .SHOWWINDOW = i_visible,
-            .HIDEWINDOW = i_hide,
-        }),
-    );
+fn registerKeys(hwnd: HWND) void {
+    for (binds) |bind, index| {
+        const mod = @intToEnum(kbm.HOT_KEY_MODIFIERS, bind.extraMod | @enumToInt(modifier));
+        if (kbm.RegisterHotKey(
+            hwnd, // hwnd
+            @intCast(i32, index), // id
+            mod, // modifier(s)
+            bind.key, // virtual key-code
+        ) == 0) {
+            @panic("Unable to register hotkey");
+        }
+    }
 }
 
 fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
@@ -261,7 +432,7 @@ fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
 
     const tray = wam.FindWindowW(u16Literal("Shell_TrayWnd"), null);
     if (tray != null) {
-        setVisibility(tray.?, false);
+        setHwndVisibility(tray.?, false);
     }
 
     const class_style = std.mem.zeroes(wam.WNDCLASS_STYLES);
@@ -288,36 +459,44 @@ fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
     const ex_style = std.mem.zeroes(wam.WINDOW_EX_STYLE);
     const style = std.mem.zeroes(wam.WINDOW_STYLE);
 
-    var wmhwnd = wam.CreateWindowExW(ex_style, WTITLE, WTITLE, style, 0, 0, 0, 0, wam.HWND_MESSAGE, null, h_instance, null);
-    if (wmhwnd == null) {
+    var opt_wmhwnd = wam.CreateWindowExW(ex_style, WTITLE, WTITLE, style, 0, 0, 0, 0, wam.HWND_MESSAGE, null, h_instance, null);
+    if (opt_wmhwnd == null) {
         std.debug.print("{}\n", .{GetLastError()});
         @panic("Unable to create window");
     }
     info("Window created", .{});
 
+    var wmhwnd = opt_wmhwnd.?;
+
     _ = wam.EnumWindows(enumWndProc, 0);
 
-    if (kbm.RegisterHotKey(
-        wmhwnd, // hwnd
-        0, // id
-        kbm.HOT_KEY_MODIFIERS.ALT, // mod
-        'E', // key
-    ) == 0) {
-        @panic("Unable to bind exit key");
-    }
+    //if (kbm.RegisterHotKey(
+    //wmhwnd, // hwnd
+    //0, // id
+    //kbm.HOT_KEY_MODIFIERS.ALT, // mod
+    //'E', // key
+    //) == 0) {
+    //@panic("Unable to bind exit key");
+    //}
+
+    registerKeys(wmhwnd);
 
     if (wam.RegisterShellHookWindow(wmhwnd) == 0) {
         @panic("Could not RegisterShellHookWindow");
     }
 
     shellHookId = wam.RegisterWindowMessageW(u16Literal("SHELLHOOK"));
+    updateGeometry();
 }
 
 fn deinit() void {
     defer clients.deinit();
     const tray = wam.FindWindowW(u16Literal("Shell_TrayWnd"), null);
     if (tray != null) {
-        setVisibility(tray.?, true);
+        setHwndVisibility(tray.?, true);
+    }
+    for (clients.items) |*client| {
+        client.setVisibility(true);
     }
 }
 
