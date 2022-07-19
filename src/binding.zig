@@ -12,6 +12,8 @@ pub extern "dwmapi" fn DwmGetWindowAttribute(hwnd: HWND, dwAttribute: DWORD, pvA
 
 pub extern fn GetSystemMetrics(index: c_int) callconv(.C) c_int;
 
+pub extern fn SetActiveWindow(hWnd: ?HWND) callconv(.C) HWND;
+
 pub const SM_XVIRTUALSCREEN = 76;
 pub const SM_YVIRTUALSCREEN = 77;
 pub const SM_CXVIRTUALSCREEN = 78;

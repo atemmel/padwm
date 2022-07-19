@@ -32,19 +32,14 @@ const KeyBind = struct {
     action: []const u8,
     arg: []const u8,
 
-    fn init(key: kbm.VIRTUAL_KEY, action: []const u8, arg: []const u8) KeyBind {
-        return KeyBind{
-            .key = @enumToInt(key),
-            .extraMod = 0,
-            .action = action,
-            .arg = arg,
-        };
-    }
+    const InitOptions = struct {
+        mod: kbm.HOT_KEY_MODIFIERS = @intToEnum(kbm.HOT_KEY_MODIFIERS, 0),
+    };
 
-    fn initMod(key: kbm.VIRTUAL_KEY, mod: kbm.HOT_KEY_MODIFIERS, action: []const u8, arg: []const u8) KeyBind {
+    fn init(key: kbm.VIRTUAL_KEY, action: []const u8, arg: []const u8, opt: InitOptions) KeyBind {
         return KeyBind{
             .key = @enumToInt(key),
-            .extraMod = @enumToInt(mod),
+            .extraMod = @enumToInt(opt.mod),
             .action = action,
             .arg = arg,
         };
@@ -54,12 +49,24 @@ const KeyBind = struct {
 const modifier = kbm.HOT_KEY_MODIFIERS.ALT;
 
 const binds = [_]KeyBind{
-    KeyBind.initMod(kbm.VK_E, kbm.MOD_SHIFT, "exit", ""),
+    // exit padwm
+    KeyBind.init(kbm.VK_E, "exit", "", .{ .mod = kbm.MOD_SHIFT }),
 
-    KeyBind.init(kbm.VK_H, "walk", "left"),
-    KeyBind.init(kbm.VK_L, "walk", "right"),
-    KeyBind.init(kbm.VK_K, "walk", "up"),
-    KeyBind.init(kbm.VK_J, "walk", "down"),
+    // change active workspace
+    KeyBind.init(kbm.VK_H, "walk", "left", .{}),
+    KeyBind.init(kbm.VK_L, "walk", "right", .{}),
+    KeyBind.init(kbm.VK_K, "walk", "up", .{}),
+    KeyBind.init(kbm.VK_J, "walk", "down", .{}),
+
+    // cycle through clients
+    KeyBind.init(kbm.VK_W, "cycle", "backwards", .{}),
+    KeyBind.init(kbm.VK_E, "cycle", "forwards", .{}),
+
+    // move client to workspace
+    KeyBind.init(kbm.VK_H, "move", "left", .{ .mod = kbm.MOD_SHIFT }),
+    KeyBind.init(kbm.VK_L, "move", "right", .{ .mod = kbm.MOD_SHIFT }),
+    KeyBind.init(kbm.VK_K, "move", "up", .{ .mod = kbm.MOD_SHIFT }),
+    KeyBind.init(kbm.VK_J, "move", "down", .{ .mod = kbm.MOD_SHIFT }),
 };
 
 const Client = struct {
@@ -81,6 +88,7 @@ const Client = struct {
 
 const Clients = std.ArrayList(Client);
 var clients: Clients = undefined;
+var focused_client: ?usize = null;
 var running = true;
 var shellHookId: u32 = 0;
 
@@ -104,6 +112,11 @@ const Direction = enum(u8) {
     up,
     down,
     _,
+};
+
+const Cycle = enum(u8) {
+    backwards,
+    forwards,
 };
 
 var active_workspace = Workspace.center;
@@ -148,41 +161,97 @@ fn changeWorkspace(ws: Workspace) void {
     focusPrev();
 }
 
-fn focusPrev() void {
-    var i: usize = clients.items.len - 1;
-    while (true) {
-        const client = &clients.items[i];
-        if (client.workspace == active_workspace) {
-            focus(client);
-            return;
+fn moveToWorkspace(ws: Workspace) void {
+    if (focused_client == null) {
+        return;
+    }
+
+    const client_idx = focused_client.?;
+    var client = &clients.items[client_idx];
+
+    client.setVisibility(false);
+    client.workspace = ws;
+}
+
+fn findFirstClientInWs(ws: Workspace, slice: []Client) ?usize {
+    var i: usize = 0;
+    while (i < slice.len) {
+        const client = &slice[i];
+        if (client.workspace == ws) {
+            return i;
         }
+    }
+    return null;
+}
+
+fn findLastClientInWs(ws: Workspace, slice: []Client) ?usize {
+    if (slice.len == 0) {
+        return null;
+    }
+    var i = slice.len - 1;
+    while (true) {
+        const client = &slice[i];
+        if (client.workspace == ws) {
+            return i;
+        }
+
         if (i == 0) {
             break;
         }
         i -= 1;
     }
-    focus(null);
+    return null;
+}
+
+fn focusPrev() void {
+    if (focused_client) |client_idx| {
+        const centre = client_idx + 1;
+        const left = clients.items[0..client_idx];
+        const right = clients.items[centre..];
+        if (findLastClientInWs(active_workspace, left)) |found| {
+            focus(found);
+        } else if (findLastClientInWs(active_workspace, right)) |found| {
+            const to_focus = found + centre;
+            focus(to_focus);
+        }
+    } else if (findFirstClientInWs(active_workspace, clients.items)) |found| {
+        focus(found);
+    } else {
+        focus(null);
+    }
 }
 
 fn focusNext() void {
-    var i: usize = 0;
-    while (i < clients.items.len) {
-        const client = &clients.items[i];
-        if (client.workspace == active_workspace) {
-            focus(client);
-            return;
+    if (focused_client) |client_idx| {
+        const centre = client_idx + 1;
+        const left = clients.items[0..client_idx];
+        const right = clients.items[centre..];
+        if (findFirstClientInWs(active_workspace, right)) |found| {
+            const to_focus = found + centre;
+            focus(to_focus);
+        } else if (findFirstClientInWs(active_workspace, left)) |found| {
+            focus(found);
         }
-        i += 1;
+    } else if (findLastClientInWs(active_workspace, clients.items)) |found| {
+        focus(found);
+    } else {
+        focus(null);
     }
-    focus(null);
 }
 
-fn focus(client: ?*const Client) void {
-    if (client == null) {
+fn focus(client_idx: ?usize) void {
+    if (client_idx == null) {
         _ = wam.SetForegroundWindow(null);
+        _ = wam.BringWindowToTop(null);
+        _ = binding.SetActiveWindow(null);
     } else {
-        _ = wam.SetForegroundWindow(client.?.hwnd);
+        const client = &clients.items[client_idx.?];
+        _ = wam.SetForegroundWindow(client.hwnd);
+        _ = wam.BringWindowToTop(client.hwnd);
+        _ = binding.SetActiveWindow(client.hwnd);
     }
+    focused_client = client_idx;
+    print("Focusing: {}\n", .{focused_client});
 }
 
 fn findClient(hwnd: ?HWND) ?*Client {
@@ -267,6 +336,7 @@ fn shouldManage(hwnd: HWND) bool {
         u16Literal("Start"),
         u16Literal("Windows Default Lock Screen"),
         u16Literal("Search"),
+        u16Literal(""),
     };
 
     const ignore_class = [_][:0]const u16{
@@ -275,6 +345,7 @@ fn shouldManage(hwnd: HWND) bool {
         u16Literal("Static"),
         u16Literal("Scrollbar"),
         u16Literal("Progman"),
+        u16Literal("tooltips_class32"),
     };
 
     for (ignore_title) |str| {
@@ -367,6 +438,22 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                     if (std.meta.stringToEnum(Direction, bind.arg)) |direction| {
                         const next_workspace = lookupWorkspace(direction);
                         changeWorkspace(next_workspace);
+                    }
+                } else if (std.mem.eql(u8, bind.action, "move")) {
+                    if (std.meta.stringToEnum(Direction, bind.arg)) |direction| {
+                        const next_workspace = lookupWorkspace(direction);
+                        moveToWorkspace(next_workspace);
+                    }
+                } else if (std.mem.eql(u8, bind.action, "cycle")) {
+                    if (std.meta.stringToEnum(Cycle, bind.arg)) |cycle| {
+                        switch (cycle) {
+                            .backwards => {
+                                focusPrev();
+                            },
+                            .forwards => {
+                                focusNext();
+                            },
+                        }
                     }
                 }
             }
@@ -470,15 +557,6 @@ fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
 
     _ = wam.EnumWindows(enumWndProc, 0);
 
-    //if (kbm.RegisterHotKey(
-    //wmhwnd, // hwnd
-    //0, // id
-    //kbm.HOT_KEY_MODIFIERS.ALT, // mod
-    //'E', // key
-    //) == 0) {
-    //@panic("Unable to bind exit key");
-    //}
-
     registerKeys(wmhwnd);
 
     if (wam.RegisterShellHookWindow(wmhwnd) == 0) {
@@ -503,7 +581,10 @@ fn deinit() void {
 pub fn wWinMain(h_instance_param: windows.HINSTANCE, _: ?windows.HINSTANCE, _: [*:0]const u16, _: i32) c_int {
     _ = h_instance_param;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(!gpa.deinit());
+    defer {
+        deinit();
+        std.debug.assert(!gpa.deinit());
+    }
     const h_instance = @ptrCast(HINSTANCE, h_instance_param);
     init(h_instance, gpa.allocator());
     var msg = std.mem.zeroes(wam.MSG);
@@ -511,6 +592,5 @@ pub fn wWinMain(h_instance_param: windows.HINSTANCE, _: ?windows.HINSTANCE, _: [
         _ = TranslateMessage(&msg);
         _ = DispatchMessage(&msg);
     }
-    deinit();
     return @intCast(c_int, msg.wParam);
 }
