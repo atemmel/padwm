@@ -422,7 +422,7 @@ fn shouldManage(hwnd: HWND) bool {
         L("tooltips_class32"),
 
         // Use when debugging
-        //L("mintty"),
+        L("mintty"),
     };
 
     for (ignore_title) |str| {
@@ -551,6 +551,23 @@ fn isCloaked(hwnd: HWND) bool {
     return value != 0;
 }
 
+fn barHandler(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C) LRESULT {
+    _ = hwnd;
+    _ = msg;
+    _ = wparam;
+    _ = lparam;
+    switch (msg) {
+        wam.WM_CREATE => {},
+        wam.WM_PAINT => {},
+        wam.WM_LBUTTONDOWN, wam.WM_RBUTTONDOWN, wam.WM_MBUTTONDOWN => {},
+        wam.WM_TIMER => {},
+        else => {
+            return wam.DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+    }
+    return 0;
+}
+
 fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C) LRESULT {
     switch (msg) {
         wam.WM_HOTKEY => {
@@ -637,9 +654,46 @@ fn registerKeys(hwnd: HWND) void {
 }
 
 fn initBar(h_instance: HINSTANCE) void {
-    _ = h_instance;
-    var win_class = std.mem.zeroes(wam.WNDCLASSW);
-    _ = win_class;
+    var win_class = std.mem.zeroes(wam.WNDCLASSEXW);
+
+    const bar_name = L("padbar");
+
+    win_class.style = std.mem.zeroes(wam.WNDCLASS_STYLES);
+    win_class.lpfnWndProc = barHandler;
+    win_class.cbClsExtra = 0;
+    win_class.cbWndExtra = 0;
+    win_class.hInstance = h_instance;
+    win_class.hIcon = null;
+    win_class.hCursor = wam.LoadCursor(null, wam.IDC_ARROW);
+    win_class.hbrBackground = null;
+    win_class.lpszMenuName = null;
+    win_class.lpszClassName = bar_name;
+
+    if (wam.RegisterClassExW(&win_class) == 0) {
+        print("{}\n", .{wam.GetLastError()});
+        @panic("Unable to register class");
+    }
+
+    const style = wam.WINDOW_STYLE.initFlags(.{
+        .POPUP = 1,
+        .CLIPCHILDREN = 1,
+        .CLIPSIBLINGS = 1,
+    });
+
+    bar.hwnd = wam.CreateWindowExW(
+        wam.WS_EX_TOOLWINDOW,
+        bar_name,
+        null,
+        style,
+        0,
+        0,
+        0,
+        0,
+        null,
+        null,
+        h_instance,
+        null,
+    ) orelse @panic("Unable to setup bar");
 }
 
 fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
@@ -703,6 +757,8 @@ fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
 
     shellHookId = wam.RegisterWindowMessageW(L("SHELLHOOK"));
     updateGeometry();
+
+    initBar(h_instance);
 }
 
 fn deinit() void {
