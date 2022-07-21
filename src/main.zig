@@ -9,7 +9,7 @@ const threading = win32.system.threading;
 const foundation = win32.foundation;
 const HINSTANCE = foundation.HINSTANCE;
 const RECT = foundation.RECT;
-const HDC = wam.HDC;
+const HDC = gdi.HDC;
 const HWND = foundation.HWND;
 const WPARAM = foundation.WPARAM;
 const LPARAM = foundation.LPARAM;
@@ -100,6 +100,8 @@ var desktop_width: i32 = 0;
 var desktop_height: i32 = 0;
 
 const Bar = struct {
+    x: i32,
+    y: i32,
     w: i32,
     h: i32,
     hwnd: HWND,
@@ -174,6 +176,13 @@ fn updateGeometry() void {
     desktop_y = binding.GetSystemMetrics(binding.SM_YVIRTUALSCREEN);
     desktop_width = binding.GetSystemMetrics(binding.SM_CXVIRTUALSCREEN);
     desktop_height = binding.GetSystemMetrics(binding.SM_CYVIRTUALSCREEN);
+
+    bar.h = 20;
+    desktop_y = desktop_y + bar.h;
+    desktop_height = desktop_height - bar.h;
+    bar.y = desktop_y - bar.h;
+    print("updateGeometry: {}\n", .{bar});
+    print("d_x: {} d_y: {} d_w: {} d_h: {}\n", .{ desktop_x, desktop_y, desktop_width, desktop_height });
 }
 
 fn lookupWorkspace(dir: Direction) Workspace {
@@ -454,10 +463,28 @@ fn shouldManage(hwnd: HWND) bool {
     return false;
 }
 
+fn updateBar() void {
+    const flags = wam.SET_WINDOW_POS_FLAGS.initFlags(.{
+        .SHOWWINDOW = 1,
+        .NOACTIVATE = 1,
+        .NOSENDCHANGING = 1,
+    });
+    const x = 0;
+    _ = wam.SetWindowPos(
+        bar.hwnd,
+        wam.HWND_TOPMOST,
+        x,
+        bar.y,
+        desktop_width,
+        bar.h,
+        flags,
+    );
+}
+
 fn drawBar() void {
-    draw_context.hdc = wam.GetWindowDC(bar.hwnd);
+    draw_context.hdc = gdi.GetWindowDC(bar.hwnd);
     draw_context.h = bar.h;
-    defer wam.ReleaseDC(bar.hwnd, draw_context.hdc);
+    defer _ = gdi.ReleaseDC(bar.hwnd, draw_context.hdc);
 
     var x: i32 = undefined;
     draw_context.x = 0;
@@ -466,12 +493,18 @@ fn drawBar() void {
     _ = x;
     _ = i;
 
-    const str = []const u16{};
-    drawText(&str);
+    const str = L("gaming");
+    drawText(str);
 }
 
 fn drawText(text: []const u16) void {
     _ = text;
+
+    draw_context.x = 0;
+    draw_context.y = 0;
+    draw_context.w = 500;
+    draw_context.h = bar.h;
+
     const r = RECT{
         .left = draw_context.x,
         .top = draw_context.y,
@@ -483,17 +516,19 @@ fn drawText(text: []const u16) void {
     const sel_border_color = 0x00775500;
     const fg_color = 0x00eeeeee;
     const pen = gdi.CreatePen(gdi.PS_SOLID, border_px, sel_border_color);
+    check(pen != null, "Could not create pen");
     const brush = gdi.CreateSolidBrush(fg_color);
+    check(brush != null, "Could not create brush");
 
     defer {
-        gdi.DeleteObject(pen);
-        gdi.DeleteObject(brush);
+        _ = gdi.DeleteObject(pen);
+        _ = gdi.DeleteObject(brush);
     }
 
-    wam.SelectObject(draw_context.hdc, pen);
-    wam.SelectObject(draw_context.hdc, brush);
-
-    gdi.FillRect(draw_context.hdc, &r, brush);
+    check(gdi.SelectObject(draw_context.hdc, pen) != null, "Could not select pen");
+    check(gdi.SelectObject(draw_context.hdc, brush) != null, "Could not select brush");
+    check(gdi.FillRect(draw_context.hdc, &r, brush) != 0, "Could not draw rect");
+    print("Drawing: {}\n", .{r});
 }
 
 fn manage(hwnd: HWND) void {
@@ -552,15 +587,23 @@ fn isCloaked(hwnd: HWND) bool {
 }
 
 fn barHandler(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C) LRESULT {
-    _ = hwnd;
-    _ = msg;
-    _ = wparam;
-    _ = lparam;
     switch (msg) {
-        wam.WM_CREATE => {},
-        wam.WM_PAINT => {},
-        wam.WM_LBUTTONDOWN, wam.WM_RBUTTONDOWN, wam.WM_MBUTTONDOWN => {},
-        wam.WM_TIMER => {},
+        wam.WM_CREATE => {
+            updateBar();
+        },
+        wam.WM_PAINT => {
+            var ps = std.mem.zeroes(gdi.PAINTSTRUCT);
+            _ = gdi.BeginPaint(hwnd, &ps);
+            drawBar();
+            _ = gdi.EndPaint(hwnd, &ps);
+        },
+        wam.WM_LBUTTONDOWN, wam.WM_RBUTTONDOWN, wam.WM_MBUTTONDOWN => {
+            print("CLICK\n", .{});
+        },
+        wam.WM_TIMER => {
+            drawBar();
+            return wam.DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
         else => {
             return wam.DefWindowProcW(hwnd, msg, wparam, lparam);
         },
@@ -653,26 +696,42 @@ fn registerKeys(hwnd: HWND) void {
     }
 }
 
+fn checkLastError(msg: []const u8) void {
+    const err = GetLastError();
+    if (err != .SUCCESS) {
+        print("error code: {}\n", .{err});
+        @panic(msg);
+    }
+}
+
+fn check(expr: bool, msg: []const u8) void {
+    if (!expr) {
+        @panic(msg);
+    }
+}
+
 fn initBar(h_instance: HINSTANCE) void {
     var win_class = std.mem.zeroes(wam.WNDCLASSEXW);
 
     const bar_name = L("padbar");
 
+    const h_cursor = wam.LoadCursor(null, wam.IDC_ARROW);
+    check(h_cursor != null, "Unable to load cursor");
+
+    win_class.cbSize = @sizeOf(@TypeOf(win_class));
     win_class.style = std.mem.zeroes(wam.WNDCLASS_STYLES);
     win_class.lpfnWndProc = barHandler;
     win_class.cbClsExtra = 0;
     win_class.cbWndExtra = 0;
     win_class.hInstance = h_instance;
     win_class.hIcon = null;
-    win_class.hCursor = wam.LoadCursor(null, wam.IDC_ARROW);
+    win_class.hCursor = h_cursor;
     win_class.hbrBackground = null;
     win_class.lpszMenuName = null;
     win_class.lpszClassName = bar_name;
+    win_class.hIconSm = null;
 
-    if (wam.RegisterClassExW(&win_class) == 0) {
-        print("{}\n", .{wam.GetLastError()});
-        @panic("Unable to register class");
-    }
+    check(wam.RegisterClassExW(&win_class) != 0, "Unable to register class");
 
     const style = wam.WINDOW_STYLE.initFlags(.{
         .POPUP = 1,
@@ -680,7 +739,7 @@ fn initBar(h_instance: HINSTANCE) void {
         .CLIPSIBLINGS = 1,
     });
 
-    bar.hwnd = wam.CreateWindowExW(
+    const maybe_hwnd = wam.CreateWindowExW(
         wam.WS_EX_TOOLWINDOW,
         bar_name,
         null,
@@ -693,7 +752,18 @@ fn initBar(h_instance: HINSTANCE) void {
         null,
         h_instance,
         null,
-    ) orelse @panic("Unable to setup bar");
+    );
+    check(maybe_hwnd != null, "Unable to create window");
+
+    bar.hwnd = maybe_hwnd.?;
+
+    //draw_context.hdc = gdi.GetWindowDC(bar.hwnd);
+    //var font = @ptrCast(?gdi.HFONT, gdi.GetStockObject(.SYSTEM_FONT));
+    //check(font != null, "Unable to get font");
+
+    _ = wam.PostMessage(bar.hwnd, wam.WM_PAINT, 0, 0);
+    const clock_interval = 15000;
+    _ = wam.SetTimer(bar.hwnd, 1, clock_interval, null);
 }
 
 fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
@@ -705,9 +775,7 @@ fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
     // mutex is freed automatically by windows when process dies
     const mutex = threading.CreateMutexW(null, 1, WTITLE);
     assert(mutex != null);
-    if (GetLastError() == windows.Win32Error.ALREADY_EXISTS) {
-        @panic(TITLE ++ " is already running.");
-    }
+    checkLastError(TITLE ++ " is already running");
 
     const tray = wam.FindWindowW(L("Shell_TrayWnd"), null);
     if (tray != null) {
@@ -731,18 +799,14 @@ fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
         .lpszClassName = WTITLE,
     };
 
-    if (wam.RegisterClassExW(&win_class) == 0) {
-        @panic("Unable to register window class");
-    }
+    _ = wam.RegisterClassExW(&win_class);
+    checkLastError("Unable to register window class");
 
     const ex_style = std.mem.zeroes(wam.WINDOW_EX_STYLE);
     const style = std.mem.zeroes(wam.WINDOW_STYLE);
 
-    var opt_wmhwnd = wam.CreateWindowExW(ex_style, WTITLE, WTITLE, style, 0, 0, 0, 0, wam.HWND_MESSAGE, null, h_instance, null);
-    if (opt_wmhwnd == null) {
-        std.debug.print("{}\n", .{GetLastError()});
-        @panic("Unable to create window");
-    }
+    var opt_wmhwnd = wam.CreateWindowExW(ex_style, WTITLE, WTITLE, style, 0, 0, 0, 0, null, null, h_instance, null);
+    checkLastError("Unable to create window");
     info("Window created", .{});
 
     var wmhwnd = opt_wmhwnd.?;
@@ -751,14 +815,17 @@ fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
 
     registerKeys(wmhwnd);
 
-    if (wam.RegisterShellHookWindow(wmhwnd) == 0) {
-        @panic("Could not RegisterShellHookWindow");
-    }
+    check(
+        wam.RegisterShellHookWindow(wmhwnd) == 1,
+        "Could not RegisterShellHookWindow",
+    );
 
     shellHookId = wam.RegisterWindowMessageW(L("SHELLHOOK"));
     updateGeometry();
 
     initBar(h_instance);
+
+    updateBar();
 }
 
 fn deinit() void {
