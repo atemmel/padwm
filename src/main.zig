@@ -85,7 +85,7 @@ const Client = struct {
     old_y: i32 = 0,
     old_w: i32 = 0,
     old_h: i32 = 0,
-    maximised: bool,
+    maximised: bool = false,
 
     pub fn resize(self: *Client, x: i32, y: i32, w: i32, h: i32) void {
         var rect = std.mem.zeroes(RECT);
@@ -364,6 +364,9 @@ fn focus(client_idx: ?usize) void {
         _ = wam.SetForegroundWindow(client.hwnd);
         _ = wam.BringWindowToTop(client.hwnd);
         _ = binding.SetActiveWindow(client.hwnd);
+
+        var long_styles = wam.GetWindowLongW(client.hwnd, wam.GWL_STYLE) & ~@intCast(i32, @enumToInt(wam.WS_MINIMIZEBOX));
+        _ = wam.SetWindowLongW(client.hwnd, wam.GWL_STYLE, long_styles);
     }
     focused_client = client_idx;
 }
@@ -524,19 +527,24 @@ fn drawBar() void {
     _ = x;
     _ = i;
 
-    const str = L("gaming");
-    drawText(str);
+    if (focused_client) |idx| {
+        const client = clients.items[idx];
+
+        var title_buffer: [512:0]u16 = undefined;
+        const title_len = @intCast(usize, wam.GetWindowTextW(client.hwnd, &title_buffer, title_buffer.len));
+        const title = title_buffer[0..title_len :0];
+        //checkLastError("Could not get window text");
+        drawText(title);
+    }
 }
 
-fn drawText(text: []const u16) void {
-    _ = text;
-
+fn drawText(text: [:0]const u16) void {
     draw_context.x = 0;
     draw_context.y = 0;
     draw_context.w = desktop_width;
     draw_context.h = bar.h;
 
-    const r = RECT{
+    var r = RECT{
         .left = draw_context.x,
         .top = draw_context.y,
         .right = draw_context.x + draw_context.w,
@@ -544,6 +552,7 @@ fn drawText(text: []const u16) void {
     };
 
     const border_px = 1;
+    const sel_fg_color = 0x00eeeeee;
     const sel_border_color = 0x00775500;
     const fg_color = 0x00ee0088;
     const pen = gdi.CreatePen(gdi.PS_SOLID, border_px, sel_border_color);
@@ -551,15 +560,31 @@ fn drawText(text: []const u16) void {
     const brush = gdi.CreateSolidBrush(fg_color);
     check(brush != null, "Could not create brush");
 
-    defer {
-        _ = gdi.DeleteObject(pen);
-        _ = gdi.DeleteObject(brush);
-    }
+    {
+        defer {
+            _ = gdi.DeleteObject(pen);
+            _ = gdi.DeleteObject(brush);
+        }
 
-    check(gdi.SelectObject(draw_context.hdc, pen) != null, "Could not select pen");
-    check(gdi.SelectObject(draw_context.hdc, brush) != null, "Could not select brush");
-    check(gdi.FillRect(draw_context.hdc, &r, brush) != 0, "Could not draw rect");
-    print("Drawing: {}\n", .{r});
+        check(gdi.SelectObject(draw_context.hdc, pen) != null, "Could not select pen");
+        check(gdi.SelectObject(draw_context.hdc, brush) != null, "Could not select brush");
+        check(gdi.FillRect(draw_context.hdc, &r, brush) != 0, "Could not draw rect");
+    }
+    //print("Drawing: {}\n", .{r});
+
+    _ = gdi.SetTextColor(draw_context.hdc, sel_fg_color);
+    _ = gdi.SetBkMode(draw_context.hdc, .TRANSPARENT);
+
+    var maybe_font = @ptrCast(?gdi.HFONT, gdi.GetStockObject(.SYSTEM_FONT));
+    check(maybe_font != null, "Unable to get font");
+    var font = maybe_font.?;
+    _ = gdi.SelectObject(draw_context.hdc, font);
+    var fmt = gdi.DRAW_TEXT_FORMAT.initFlags(.{
+        .CENTER = 1,
+        .VCENTER = 1,
+        .SINGLELINE = 1,
+    });
+    _ = gdi.DrawTextW(draw_context.hdc, text, @intCast(i32, text.len), &r, fmt);
 }
 
 fn manage(hwnd: HWND) void {
