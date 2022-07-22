@@ -69,6 +69,9 @@ const binds = [_]KeyBind{
     KeyBind.init(kbm.VK_L, "move", "right", .{ .mod = kbm.MOD_SHIFT }),
     KeyBind.init(kbm.VK_K, "move", "up", .{ .mod = kbm.MOD_SHIFT }),
     KeyBind.init(kbm.VK_J, "move", "down", .{ .mod = kbm.MOD_SHIFT }),
+
+    // toggle maximized
+    KeyBind.init(kbm.VK_M, "maximize", "", .{}),
 };
 
 const Client = struct {
@@ -78,9 +81,37 @@ const Client = struct {
     isAlive: bool,
     isCloaked: bool,
     workspace: Workspace,
+    old_x: i32 = 0,
+    old_y: i32 = 0,
+    old_w: i32 = 0,
+    old_h: i32 = 0,
+    maximised: bool,
 
-    fn resize(self: *Client, x: i32, y: i32, w: i32, h: i32) void {
+    pub fn resize(self: *Client, x: i32, y: i32, w: i32, h: i32) void {
+        var rect = std.mem.zeroes(RECT);
+        _ = wam.GetWindowRect(self.hwnd, &rect);
+        self.old_x = rect.left;
+        self.old_y = rect.top;
+        self.old_w = rect.right - rect.left;
+        self.old_h = rect.bottom - rect.top;
         _ = wam.SetWindowPos(self.hwnd, null, x, y, w, h, wam.SWP_NOACTIVATE);
+    }
+
+    pub fn maximize(self: *Client) void {
+        self.resize(0, 0, desktop_width, desktop_height);
+    }
+
+    pub fn restore(self: *Client) void {
+        self.resize(self.old_x, self.old_y, self.old_w, self.old_h);
+    }
+
+    pub fn toggleMaximized(self: *Client) void {
+        if (self.maximised) {
+            self.restore();
+        } else {
+            self.maximize();
+        }
+        self.maximised = !self.maximised;
     }
 
     fn setVisibility(self: *Client, visible: bool) void {
@@ -502,7 +533,7 @@ fn drawText(text: []const u16) void {
 
     draw_context.x = 0;
     draw_context.y = 0;
-    draw_context.w = 500;
+    draw_context.w = desktop_width;
     draw_context.h = bar.h;
 
     const r = RECT{
@@ -514,7 +545,7 @@ fn drawText(text: []const u16) void {
 
     const border_px = 1;
     const sel_border_color = 0x00775500;
-    const fg_color = 0x00eeeeee;
+    const fg_color = 0x00ee0088;
     const pen = gdi.CreatePen(gdi.PS_SOLID, border_px, sel_border_color);
     check(pen != null, "Could not create pen");
     const brush = gdi.CreateSolidBrush(fg_color);
@@ -550,6 +581,7 @@ fn manage(hwnd: HWND) void {
         .isAlive = true,
         .isCloaked = isCloaked(hwnd),
         .workspace = active_workspace,
+        .maximised = false,
     };
 
     const stack = &workspace_stacks[@enumToInt(active_workspace)];
@@ -642,6 +674,11 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                                 focusNext();
                             },
                         }
+                    }
+                } else if (std.mem.eql(u8, bind.action, "maximize")) {
+                    if (focused_client) |idx| {
+                        var client = clients.items[idx];
+                        client.toggleMaximized();
                     }
                 }
                 dumpState();
