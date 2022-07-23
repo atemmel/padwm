@@ -107,8 +107,29 @@ const Client = struct {
         _ = wam.SetWindowLongW(self.hwnd, wam.GWL_STYLE, long_styles);
     }
 
+    pub fn restore(self: *Client) void {
+        const hwnd = self.hwnd;
+        var place = std.mem.zeroes(wam.WINDOWPLACEMENT);
+        place.length = @sizeOf(@TypeOf(place));
+        if (wam.GetWindowPlacement(hwnd, &place) == 0) {
+            return;
+        }
+
+        const flag = switch (place.showCmd) {
+            wam.SW_SHOWMAXIMIZED => wam.SW_SHOWMAXIMIZED,
+            wam.SW_SHOWMINIMIZED => wam.SW_SHOWMINIMIZED,
+            else => wam.SW_NORMAL,
+        };
+
+        _ = wam.ShowWindow(hwnd, flag);
+
+        //TODO: look into this
+        //_ = wam.ShowWindow(hwnd, wam.SW_RESTORE);
+        //_ = wam.SetWindowPlacement(hwnd, &place);
+    }
+
     pub fn maximize(self: *Client) void {
-        self.resize(0, 0, desktop_width, desktop_height);
+        self.resize(desktop_x, desktop_y, desktop_width, desktop_height);
     }
 
     pub fn unMaximize(self: *Client) void {
@@ -630,6 +651,7 @@ fn manage(hwnd: HWND) void {
 
     focus(client_idx);
     client.disallowMinimize();
+    client.restore();
 }
 
 fn getRoot(hwnd: HWND) HWND {
