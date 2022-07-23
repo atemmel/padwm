@@ -97,17 +97,27 @@ const Client = struct {
         _ = wam.SetWindowPos(self.hwnd, null, x, y, w, h, wam.SWP_NOACTIVATE);
     }
 
+    pub fn disallowMinimize(self: *const Client) void {
+        const long_styles = wam.GetWindowLongW(self.hwnd, wam.GWL_STYLE) & ~@intCast(i32, @enumToInt(wam.WS_MINIMIZEBOX));
+        _ = wam.SetWindowLongW(self.hwnd, wam.GWL_STYLE, long_styles);
+    }
+
+    pub fn allowMinimize(self: *Client) void {
+        const long_styles = wam.GetWindowLongW(self.hwnd, wam.GWL_STYLE) | @intCast(i32, @enumToInt(wam.WS_MINIMIZEBOX));
+        _ = wam.SetWindowLongW(self.hwnd, wam.GWL_STYLE, long_styles);
+    }
+
     pub fn maximize(self: *Client) void {
         self.resize(0, 0, desktop_width, desktop_height);
     }
 
-    pub fn restore(self: *Client) void {
+    pub fn unMaximize(self: *Client) void {
         self.resize(self.old_x, self.old_y, self.old_w, self.old_h);
     }
 
     pub fn toggleMaximized(self: *Client) void {
         if (self.maximised) {
-            self.restore();
+            self.unMaximize();
         } else {
             self.maximize();
         }
@@ -365,8 +375,8 @@ fn focus(client_idx: ?usize) void {
         _ = wam.BringWindowToTop(client.hwnd);
         _ = binding.SetActiveWindow(client.hwnd);
 
-        var long_styles = wam.GetWindowLongW(client.hwnd, wam.GWL_STYLE) & ~@intCast(i32, @enumToInt(wam.WS_MINIMIZEBOX));
-        _ = wam.SetWindowLongW(client.hwnd, wam.GWL_STYLE, long_styles);
+        //var long_styles = wam.GetWindowLongW(client.hwnd, wam.GWL_STYLE) & ~@intCast(i32, @enumToInt(wam.WS_MINIMIZEBOX));
+        //_ = wam.SetWindowLongW(client.hwnd, wam.GWL_STYLE, long_styles);
     }
     focused_client = client_idx;
 }
@@ -617,7 +627,9 @@ fn manage(hwnd: HWND) void {
     stack.append(client_idx) catch {
         @panic("Unable to allocate memory for stack");
     };
-    focused_client = client_idx;
+
+    focus(client_idx);
+    client.disallowMinimize();
 }
 
 fn getRoot(hwnd: HWND) HWND {
@@ -706,6 +718,9 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                         client.toggleMaximized();
                     }
                 }
+
+                drawBar();
+
                 dumpState();
             }
         },
@@ -904,6 +919,7 @@ fn deinit() void {
     }
     for (clients.items) |*client| {
         client.setVisibility(true);
+        client.allowMinimize();
     }
 }
 
