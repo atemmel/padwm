@@ -85,7 +85,7 @@ const Client = struct {
     old_y: i32 = 0,
     old_w: i32 = 0,
     old_h: i32 = 0,
-    maximised: bool = false,
+    maximized: bool = false,
 
     pub fn resize(self: *Client, x: i32, y: i32, w: i32, h: i32) void {
         var rect = std.mem.zeroes(RECT);
@@ -108,41 +108,47 @@ const Client = struct {
     }
 
     pub fn restore(self: *Client) void {
-        const hwnd = self.hwnd;
-        var place = std.mem.zeroes(wam.WINDOWPLACEMENT);
-        place.length = @sizeOf(@TypeOf(place));
-        if (wam.GetWindowPlacement(hwnd, &place) == 0) {
-            return;
-        }
-
-        const flag = switch (place.showCmd) {
+        const placement = self.getPlacement();
+        const flag = switch (placement.showCmd) {
             wam.SW_SHOWMAXIMIZED => wam.SW_SHOWMAXIMIZED,
-            wam.SW_SHOWMINIMIZED => wam.SW_SHOWMINIMIZED,
+            wam.SW_SHOWMINIMIZED => wam.SW_RESTORE,
             else => wam.SW_NORMAL,
         };
-
-        _ = wam.ShowWindow(hwnd, flag);
-
-        //TODO: look into this
-        //_ = wam.ShowWindow(hwnd, wam.SW_RESTORE);
-        //_ = wam.SetWindowPlacement(hwnd, &place);
+        self.setWindowFlag(flag);
     }
 
     pub fn maximize(self: *Client) void {
+        // must set window state before setting flag
         self.resize(desktop_x, desktop_y, desktop_width, desktop_height);
+        self.setWindowFlag(wam.SW_SHOWMAXIMIZED);
     }
 
     pub fn unMaximize(self: *Client) void {
+        // must set normal before resetting window state
+        self.setWindowFlag(wam.SW_NORMAL);
         self.resize(self.old_x, self.old_y, self.old_w, self.old_h);
     }
 
+    fn setWindowFlag(self: *Client, flag: wam.SHOW_WINDOW_CMD) void {
+        const hwnd = self.hwnd;
+        _ = wam.ShowWindow(hwnd, flag);
+    }
+
+    fn getPlacement(self: *Client) wam.WINDOWPLACEMENT {
+        const hwnd = self.hwnd;
+        var placement = std.mem.zeroes(wam.WINDOWPLACEMENT);
+        placement.length = @sizeOf(@TypeOf(placement));
+        _ = wam.GetWindowPlacement(hwnd, &placement);
+        return placement;
+    }
+
     pub fn toggleMaximized(self: *Client) void {
-        if (self.maximised) {
+        if (self.maximized) {
             self.unMaximize();
         } else {
             self.maximize();
         }
-        self.maximised = !self.maximised;
+        self.maximized = !self.maximized;
     }
 
     fn setVisibility(self: *Client, visible: bool) void {
@@ -214,6 +220,7 @@ var workspace_stacks: [5]WorkspaceStack = .{
 var active_workspace = Workspace.center;
 
 fn dumpState() void {
+    var buffer: [512:0]u16 = undefined;
     const all_ws = [_]Workspace{ .center, .west, .east, .north, .south };
     for (all_ws) |ws| {
         const stack = workspace_stacks[@enumToInt(ws)].items;
@@ -223,10 +230,16 @@ fn dumpState() void {
             print("{} has [ ", .{ws});
         }
         for (stack) |c| {
+            const client = &clients.items[c];
+            const title_u16 = writeTitleToBuffer(client, &buffer);
+            const title = std.unicode.utf16leToUtf8Alloc(ally, title_u16) catch {
+                @panic("Unable to allocate memory!");
+            };
+            defer ally.free(title);
             if (focused_client != null and c == focused_client.?) {
-                print("({}) ", .{c});
+                print("({s}) ", .{title});
             } else {
-                print("{} ", .{c});
+                print("{s} ", .{title});
             }
         }
         print("]\n", .{});
@@ -281,6 +294,11 @@ fn changeWorkspace(ws: Workspace) void {
 }
 
 fn moveToWorkspace(ws: Workspace) !void {
+    defer {
+        focusNext();
+        dumpState();
+    }
+
     if (focused_client == null) {
         return;
     }
@@ -294,12 +312,20 @@ fn moveToWorkspace(ws: Workspace) !void {
     }
 
     const client_idx = focused_client.?;
+    const maybe_stack_idx = findClientInStack(client_idx, active_workspace);
+
+    if (maybe_stack_idx == null) {
+        print("Error: attempting to move client which does not belong\n", .{});
+        return;
+    }
+
+    const stack_idx = maybe_stack_idx.?;
     var client = &clients.items[client_idx];
 
     client.setVisibility(false);
     client.workspace = ws;
 
-    try target_stack.append(current_stack.pop());
+    try target_stack.append(current_stack.orderedRemove(stack_idx));
 }
 
 fn findClientInStack(client: usize, ws: Workspace) ?usize {
@@ -560,13 +586,22 @@ fn drawBar() void {
 
     if (focused_client) |idx| {
         const client = clients.items[idx];
-
         var title_buffer: [512:0]u16 = undefined;
         const title_len = @intCast(usize, wam.GetWindowTextW(client.hwnd, &title_buffer, title_buffer.len));
         const title = title_buffer[0..title_len :0];
         //checkLastError("Could not get window text");
         drawText(title);
+    } else {
+        const title = L("no window focused\x00");
+        drawText(title);
     }
+}
+
+fn writeTitleToBuffer(client: *const Client, buffer: [:0]u16) [:0]u16 {
+    const hwnd = client.hwnd;
+    const buffer_len = @intCast(i32, buffer.len);
+    const title_len = @intCast(usize, wam.GetWindowTextW(hwnd, buffer, buffer_len));
+    return buffer[0..title_len :0];
 }
 
 fn drawText(text: [:0]const u16) void {
@@ -637,7 +672,6 @@ fn manage(hwnd: HWND) void {
         .isAlive = true,
         .isCloaked = isCloaked(hwnd),
         .workspace = active_workspace,
-        .maximised = false,
     };
 
     const stack = &workspace_stacks[@enumToInt(active_workspace)];
@@ -736,14 +770,13 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                     }
                 } else if (std.mem.eql(u8, bind.action, "maximize")) {
                     if (focused_client) |idx| {
-                        var client = clients.items[idx];
+                        var client = &clients.items[idx];
+                        print("Toggling maximized for {}\n", .{idx});
                         client.toggleMaximized();
                     }
                 }
 
                 drawBar();
-
-                dumpState();
             }
         },
         else => {
@@ -752,14 +785,15 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                 const client = findClient(client_hwnd);
                 switch (wparam & 0x7FFF) {
                     wam.HSHELL_WINDOWCREATED => {
-                        print("Window created\n", .{});
+                        //print("Window created\n", .{});
                         if (client == null and shouldManage(client_hwnd.?)) {
                             print("Managing...", .{});
                             manage(client_hwnd.?);
                             var n_client = clients.items[clients.items.len - 1];
                             n_client.resize(0, 0, desktop_width, desktop_height);
+                            drawBar();
                         } else {
-                            print("Did not manage!\n", .{});
+                            //print("Did not manage!\n", .{});
                         }
                     },
                     else => {},
@@ -865,10 +899,12 @@ fn initBar(h_instance: HINSTANCE) void {
     _ = wam.SetTimer(bar.hwnd, 1, clock_interval, null);
 }
 
-fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
-    clients = Clients.init(alloc);
+var ally: std.mem.Allocator = undefined;
+
+fn init(h_instance: HINSTANCE) void {
+    clients = Clients.init(ally);
     for (workspace_stacks) |*stack| {
-        stack.* = WorkspaceStack.init(alloc);
+        stack.* = WorkspaceStack.init(ally);
     }
     _ = wam.SetProcessDPIAware();
     // mutex is freed automatically by windows when process dies
@@ -925,6 +961,8 @@ fn init(h_instance: HINSTANCE, alloc: std.mem.Allocator) void {
     initBar(h_instance);
 
     updateBar();
+
+    dumpState();
 }
 
 fn deinit() void {
@@ -953,12 +991,13 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace) nore
 pub fn wWinMain(h_instance_param: windows.HINSTANCE, _: ?windows.HINSTANCE, _: [*:0]const u16, _: i32) c_int {
     _ = h_instance_param;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    ally = gpa.allocator();
     defer {
         deinit();
         std.debug.assert(!gpa.deinit());
     }
     const h_instance = @ptrCast(HINSTANCE, h_instance_param);
-    init(h_instance, gpa.allocator());
+    init(h_instance);
     var msg = std.mem.zeroes(wam.MSG);
     while (running and GetMessage(&msg, null, 0, 0) > 0) {
         _ = TranslateMessage(&msg);
