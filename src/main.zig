@@ -78,7 +78,6 @@ const Client = struct {
     hwnd: HWND,
     parent: ?HWND,
     root: HWND,
-    isAlive: bool,
     isCloaked: bool,
     workspace: Workspace,
     old_x: i32 = 0,
@@ -86,6 +85,7 @@ const Client = struct {
     old_w: i32 = 0,
     old_h: i32 = 0,
     maximized: bool = false,
+    still_lives: bool = false,
 
     pub fn resize(self: *Client, x: i32, y: i32, w: i32, h: i32) void {
         var rect = std.mem.zeroes(RECT);
@@ -94,6 +94,10 @@ const Client = struct {
         self.old_y = rect.top;
         self.old_w = rect.right - rect.left;
         self.old_h = rect.bottom - rect.top;
+        self.resizeKeepingCoords(x, y, w, h);
+    }
+
+    pub fn resizeKeepingCoords(self: *Client, x: i32, y: i32, w: i32, h: i32) void {
         _ = wam.SetWindowPos(self.hwnd, null, x, y, w, h, wam.SWP_NOACTIVATE);
     }
 
@@ -152,7 +156,19 @@ const Client = struct {
     }
 
     fn setVisibility(self: *Client, visible: bool) void {
+        // this sends HSHELL_WINDOWDESTROYED for some reason
         setHwndVisibility(self.hwnd, visible);
+        if (!visible) {
+            // make a note that we only meant to hide it
+            self.still_lives = true;
+        }
+
+        //if (visible) {
+        //const offset_y = -(self.old_y + self.old_h) + bar.h;
+        //self.resizeKeepingCoords(self.old_x, offset_y, self.old_w, self.old_h);
+        //} else {
+        //self.resizeKeepingCoords(self.old_x, self.old_y, self.old_w, self.old_h);
+        //}
     }
 };
 
@@ -237,9 +253,9 @@ fn dumpState() void {
             };
             defer ally.free(title);
             if (focused_client != null and c == focused_client.?) {
-                print("({s}) ", .{title});
+                print("(\"{s}\") ", .{title});
             } else {
-                print("{s} ", .{title});
+                print("\"{s}\" ", .{title});
             }
         }
         print("]\n", .{});
@@ -252,7 +268,6 @@ fn updateGeometry() void {
     desktop_width = binding.GetSystemMetrics(binding.SM_CXVIRTUALSCREEN);
     desktop_height = binding.GetSystemMetrics(binding.SM_CYVIRTUALSCREEN);
 
-    bar.h = 20;
     desktop_y = desktop_y + bar.h;
     desktop_height = desktop_height - bar.h;
     bar.y = desktop_y - bar.h;
@@ -276,6 +291,9 @@ fn lookupWorkspace(dir: Direction) Workspace {
 }
 
 fn changeWorkspace(ws: Workspace) void {
+    defer {
+        dumpState();
+    }
     for (clients.items) |*client| {
         if (client.workspace == active_workspace) {
             client.setVisibility(false);
@@ -295,7 +313,6 @@ fn changeWorkspace(ws: Workspace) void {
 
 fn moveToWorkspace(ws: Workspace) !void {
     defer {
-        focusNext();
         dumpState();
     }
 
@@ -318,6 +335,8 @@ fn moveToWorkspace(ws: Workspace) !void {
         print("Error: attempting to move client which does not belong\n", .{});
         return;
     }
+
+    focusNext();
 
     const stack_idx = maybe_stack_idx.?;
     var client = &clients.items[client_idx];
@@ -377,6 +396,15 @@ fn focusTop() void {
     }
 }
 
+fn focusBottom() void {
+    const stack = workspace_stacks[@enumToInt(active_workspace)].items;
+    if (stack.len == 0) {
+        focus(null);
+    } else {
+        focus(stack[0]);
+    }
+}
+
 fn focusPrev() void {
     const stack = workspace_stacks[@enumToInt(active_workspace)].items;
     if (focused_client) |client_idx| {
@@ -412,6 +440,7 @@ fn focusNext() void {
 }
 
 fn focus(client_idx: ?usize) void {
+    //print("Focusing: {}\n", .{client_idx});
     if (client_idx == null) {
         _ = wam.SetForegroundWindow(null);
         _ = wam.BringWindowToTop(null);
@@ -623,20 +652,14 @@ fn drawText(text: [:0]const u16) void {
     const fg_color = 0x00ee0088;
     const pen = gdi.CreatePen(gdi.PS_SOLID, border_px, sel_border_color);
     check(pen != null, "Could not create pen");
+    defer _ = gdi.DeleteObject(pen);
     const brush = gdi.CreateSolidBrush(fg_color);
     check(brush != null, "Could not create brush");
+    defer _ = gdi.DeleteObject(brush);
 
-    {
-        defer {
-            _ = gdi.DeleteObject(pen);
-            _ = gdi.DeleteObject(brush);
-        }
-
-        check(gdi.SelectObject(draw_context.hdc, pen) != null, "Could not select pen");
-        check(gdi.SelectObject(draw_context.hdc, brush) != null, "Could not select brush");
-        check(gdi.FillRect(draw_context.hdc, &r, brush) != 0, "Could not draw rect");
-    }
-    //print("Drawing: {}\n", .{r});
+    check(gdi.SelectObject(draw_context.hdc, pen) != null, "Could not select pen");
+    check(gdi.SelectObject(draw_context.hdc, brush) != null, "Could not select brush");
+    check(gdi.FillRect(draw_context.hdc, &r, brush) != 0, "Could not draw rect");
 
     _ = gdi.SetTextColor(draw_context.hdc, sel_fg_color);
     _ = gdi.SetBkMode(draw_context.hdc, .TRANSPARENT);
@@ -669,7 +692,6 @@ fn manage(hwnd: HWND) void {
         .hwnd = hwnd,
         .parent = wam.GetParent(hwnd),
         .root = getRoot(hwnd),
-        .isAlive = true,
         .isCloaked = isCloaked(hwnd),
         .workspace = active_workspace,
     };
@@ -683,9 +705,42 @@ fn manage(hwnd: HWND) void {
         @panic("Unable to allocate memory for stack");
     };
 
-    focus(client_idx);
     client.disallowMinimize();
     client.restore();
+}
+
+fn unmanage(client: *Client) void {
+    var maybe_client_idx: ?usize = null;
+    for (clients.items) |*c, idx| {
+        if (c.hwnd == client.hwnd) {
+            maybe_client_idx = idx;
+        }
+    }
+
+    if (maybe_client_idx == null) {
+        return;
+    }
+
+    var buffer: [512:0]u16 = undefined;
+    const client_idx = maybe_client_idx.?;
+    const title_u16 = writeTitleToBuffer(client, &buffer);
+    const title = std.unicode.utf16leToUtf8Alloc(ally, title_u16) catch {
+        @panic("Unable to allocate memory!");
+    };
+    defer ally.free(title);
+    print("Unmanaging {} {s}\n", .{ client_idx, title });
+
+    var stack = &workspace_stacks[@enumToInt(active_workspace)];
+    var stack_idx: usize = 0;
+    for (stack.items) |c_idx, s_idx| {
+        if (c_idx == client_idx) {
+            stack_idx = s_idx;
+        }
+    }
+
+    focused_client = null;
+    _ = stack.orderedRemove(stack_idx);
+    _ = clients.orderedRemove(client_idx);
 }
 
 fn getRoot(hwnd: HWND) HWND {
@@ -752,7 +807,7 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                 } else if (std.mem.eql(u8, bind.action, "move")) {
                     if (std.meta.stringToEnum(Direction, bind.arg)) |direction| {
                         const next_workspace = lookupWorkspace(direction);
-                        print("\n\nAsking to move client {} from {} to {}\n\n", .{ focused_client, active_workspace, next_workspace });
+                        print("\nAsking to move client {} from {} to {}\n", .{ focused_client, active_workspace, next_workspace });
                         moveToWorkspace(next_workspace) catch |err| {
                             print("Unable to move to workspace: {s}\n", .{err});
                         };
@@ -781,23 +836,31 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
         },
         else => {
             if (msg == shellHookId) {
-                const client_hwnd = @intToPtr(?HWND, @intCast(usize, lparam));
-                const client = findClient(client_hwnd);
+                const client_hwnd = @intToPtr(?HWND, @intCast(usize, lparam)).?;
+                const maybe_client = findClient(client_hwnd);
                 switch (wparam & 0x7FFF) {
                     wam.HSHELL_WINDOWCREATED => {
                         //print("Window created\n", .{});
-                        if (client == null and shouldManage(client_hwnd.?)) {
-                            print("Managing...", .{});
-                            manage(client_hwnd.?);
+                        if (maybe_client == null and shouldManage(client_hwnd)) {
+                            print("Managing...\n", .{});
+                            manage(client_hwnd);
                             var n_client = clients.items[clients.items.len - 1];
-                            n_client.resize(0, 0, desktop_width, desktop_height);
-                            drawBar();
+                            n_client.resize(desktop_x, desktop_y, desktop_width, desktop_height);
                         } else {
                             //print("Did not manage!\n", .{});
                         }
                     },
+                    wam.HSHELL_WINDOWDESTROYED => {
+                        if (maybe_client) |client| {
+                            if (!client.still_lives) {
+                                unmanage(client);
+                            }
+                        }
+                    },
+                    wam.HSHELL_WINDOWACTIVATED => {},
                     else => {},
                 }
+                drawBar();
             } else {
                 return wam.DefWindowProcW(hwnd, msg, wparam, lparam);
             }
@@ -807,9 +870,7 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
 }
 
 fn enumWndProc(hwnd: HWND, _: LPARAM) callconv(.C) BOOL {
-    if (findClient(hwnd)) |client| {
-        client.isAlive = true;
-    } else if (shouldManage(hwnd)) {
+    if (findClient(hwnd) == null and shouldManage(hwnd)) {
         manage(hwnd);
     }
     return 1;
@@ -912,9 +973,19 @@ fn init(h_instance: HINSTANCE) void {
     assert(mutex != null);
     checkLastError(TITLE ++ " is already running");
 
-    const tray = wam.FindWindowW(L("Shell_TrayWnd"), null);
-    if (tray != null) {
-        setHwndVisibility(tray.?, false);
+    const maybe_tray = wam.FindWindowW(L("Shell_TrayWnd"), null);
+    if (maybe_tray) |tray| {
+        var rect = RECT{
+            .left = 0,
+            .right = 0,
+            .top = 0,
+            .bottom = 20,
+        };
+        _ = wam.GetWindowRect(tray, &rect);
+        bar.h = rect.bottom - rect.top;
+        setHwndVisibility(tray, false);
+    } else {
+        bar.h = 20;
     }
 
     const class_style = std.mem.zeroes(wam.WNDCLASS_STYLES);
@@ -940,13 +1011,15 @@ fn init(h_instance: HINSTANCE) void {
     const ex_style = std.mem.zeroes(wam.WINDOW_EX_STYLE);
     const style = std.mem.zeroes(wam.WINDOW_STYLE);
 
-    var opt_wmhwnd = wam.CreateWindowExW(ex_style, WTITLE, WTITLE, style, 0, 0, 0, 0, null, null, h_instance, null);
+    var maybe_wmhwnd = wam.CreateWindowExW(ex_style, WTITLE, WTITLE, style, 0, 0, 0, 0, null, null, h_instance, null);
     checkLastError("Unable to create window");
     info("Window created", .{});
 
-    var wmhwnd = opt_wmhwnd.?;
+    var wmhwnd = maybe_wmhwnd.?;
 
+    // collect all active windows
     _ = wam.EnumWindows(enumWndProc, 0);
+    focusBottom();
 
     registerKeys(wmhwnd);
 
