@@ -387,6 +387,32 @@ fn findLastClientInWs(ws: Workspace, slice: []Client) ?usize {
     return null;
 }
 
+fn prepareFocusCloseClient() void {
+    if (focused_client == null) {
+        return;
+    }
+
+    const stack = workspace_stacks[@enumToInt(active_workspace)].items;
+    var maybe_stack_idx: ?usize = 0;
+    for (stack) |i, j| {
+        if (i == focused_client.?) {
+            maybe_stack_idx = j;
+            break;
+        }
+    }
+    if (maybe_stack_idx == null) {
+        focused_client = null;
+        return;
+    }
+
+    const stack_idx = maybe_stack_idx.?;
+    if (stack_idx < stack.len - 1) {
+        focused_client = stack[stack_idx + 1];
+    } else {
+        focused_client = stack[stack.len - 1];
+    }
+}
+
 fn focusTop() void {
     const stack = workspace_stacks[@enumToInt(active_workspace)].items;
     if (stack.len == 0) {
@@ -427,7 +453,7 @@ fn focusNext() void {
     if (focused_client) |client_idx| {
         const stack_idx = findClientInStack(client_idx, active_workspace);
         if (stack_idx) |idx| {
-            const to_focus = stack[if (idx == stack.len - 1) 0 else idx + 1];
+            const to_focus = stack[if (idx >= stack.len - 1) 0 else idx + 1];
             focus(to_focus);
         } else {
             focus(null);
@@ -440,7 +466,7 @@ fn focusNext() void {
 }
 
 fn focus(client_idx: ?usize) void {
-    //print("Focusing: {}\n", .{client_idx});
+    print("Focusing: {}\n", .{client_idx});
     if (client_idx == null) {
         _ = wam.SetForegroundWindow(null);
         _ = wam.BringWindowToTop(null);
@@ -602,6 +628,7 @@ fn updateBar() void {
 }
 
 fn drawBar() void {
+    print("Drawing bar...\n", .{});
     draw_context.hdc = gdi.GetWindowDC(bar.hwnd);
     draw_context.h = bar.h;
     defer _ = gdi.ReleaseDC(bar.hwnd, draw_context.hdc);
@@ -707,6 +734,7 @@ fn manage(hwnd: HWND) void {
 
     client.disallowMinimize();
     client.restore();
+    focus(client_idx);
 }
 
 fn unmanage(client: *Client) void {
@@ -738,9 +766,19 @@ fn unmanage(client: *Client) void {
         }
     }
 
-    focused_client = null;
+    // very cheap fix, probably bad
+    for (stack.items) |*s| {
+        if (s.* > client_idx) {
+            s.* -= 1;
+        }
+    }
+
+    prepareFocusCloseClient();
+    //focused_client = null;
     _ = stack.orderedRemove(stack_idx);
     _ = clients.orderedRemove(client_idx);
+    dumpState();
+    focus(focused_client);
 }
 
 fn getRoot(hwnd: HWND) HWND {
@@ -803,6 +841,7 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                     if (std.meta.stringToEnum(Direction, bind.arg)) |direction| {
                         const next_workspace = lookupWorkspace(direction);
                         changeWorkspace(next_workspace);
+                        drawBar();
                     }
                 } else if (std.mem.eql(u8, bind.action, "move")) {
                     if (std.meta.stringToEnum(Direction, bind.arg)) |direction| {
@@ -811,6 +850,7 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                         moveToWorkspace(next_workspace) catch |err| {
                             print("Unable to move to workspace: {s}\n", .{err});
                         };
+                        drawBar();
                     }
                 } else if (std.mem.eql(u8, bind.action, "cycle")) {
                     if (std.meta.stringToEnum(Cycle, bind.arg)) |cycle| {
@@ -822,6 +862,7 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                                 focusNext();
                             },
                         }
+                        drawBar();
                     }
                 } else if (std.mem.eql(u8, bind.action, "maximize")) {
                     if (focused_client) |idx| {
@@ -830,13 +871,15 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                         client.toggleMaximized();
                     }
                 }
-
-                drawBar();
             }
         },
         else => {
             if (msg == shellHookId) {
-                const client_hwnd = @intToPtr(?HWND, @intCast(usize, lparam)).?;
+                const maybe_client_hwnd = @intToPtr(?HWND, @intCast(usize, lparam));
+                if (maybe_client_hwnd == null) {
+                    return 0;
+                }
+                const client_hwnd = maybe_client_hwnd.?;
                 const maybe_client = findClient(client_hwnd);
                 switch (wparam & 0x7FFF) {
                     wam.HSHELL_WINDOWCREATED => {
@@ -844,9 +887,14 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                         if (maybe_client == null and shouldManage(client_hwnd)) {
                             print("Managing...\n", .{});
                             manage(client_hwnd);
-                            var n_client = clients.items[clients.items.len - 1];
-                            n_client.resize(desktop_x, desktop_y, desktop_width, desktop_height);
-                        } else {
+                            //var n_client = clients.items[clients.items.len - 1];
+                            //n_client.resize(desktop_x, desktop_y, desktop_width, desktop_height);
+                        } else if (maybe_client != null) {
+                            for (clients.items) |*c, i| {
+                                if (c == maybe_client.?) {
+                                    focus(i);
+                                }
+                            }
                             //print("Did not manage!\n", .{});
                         }
                     },
@@ -854,6 +902,8 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                         if (maybe_client) |client| {
                             if (!client.still_lives) {
                                 unmanage(client);
+                            } else {
+                                client.still_lives = false;
                             }
                         }
                     },
@@ -956,7 +1006,7 @@ fn initBar(h_instance: HINSTANCE) void {
     //check(font != null, "Unable to get font");
 
     _ = wam.PostMessage(bar.hwnd, wam.WM_PAINT, 0, 0);
-    const clock_interval = 15000;
+    const clock_interval = 10_000;
     _ = wam.SetTimer(bar.hwnd, 1, clock_interval, null);
 }
 
