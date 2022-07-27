@@ -406,10 +406,15 @@ fn prepareFocusCloseClient() void {
     }
 
     const stack_idx = maybe_stack_idx.?;
-    if (stack_idx < stack.len - 1) {
-        focused_client = stack[stack_idx + 1];
+    //if (stack_idx < stack.len - 1) {
+    //focused_client = stack[stack_idx + 1];
+    //} else {
+    //focused_client = stack[stack.len - 1];
+    //}
+    if (stack_idx > 0) {
+        focused_client = stack[stack_idx - 1];
     } else {
-        focused_client = stack[stack.len - 1];
+        focused_client = stack[0];
     }
 }
 
@@ -476,11 +481,9 @@ fn focus(client_idx: ?usize) void {
         _ = wam.SetForegroundWindow(client.hwnd);
         _ = wam.BringWindowToTop(client.hwnd);
         _ = binding.SetActiveWindow(client.hwnd);
-
-        //var long_styles = wam.GetWindowLongW(client.hwnd, wam.GWL_STYLE) & ~@intCast(i32, @enumToInt(wam.WS_MINIMIZEBOX));
-        //_ = wam.SetWindowLongW(client.hwnd, wam.GWL_STYLE, long_styles);
     }
     focused_client = client_idx;
+    drawBar();
 }
 
 fn findClient(hwnd: ?HWND) ?*Client {
@@ -630,27 +633,52 @@ fn updateBar() void {
 fn drawBar() void {
     print("Drawing bar...\n", .{});
     draw_context.hdc = gdi.GetWindowDC(bar.hwnd);
-    draw_context.h = bar.h;
     defer _ = gdi.ReleaseDC(bar.hwnd, draw_context.hdc);
-
-    var x: i32 = undefined;
     draw_context.x = 0;
+    draw_context.y = 0;
+    draw_context.w = desktop_width;
+    draw_context.h = bar.h;
 
-    var i: i32 = 0;
-    _ = x;
-    _ = i;
+    var title_buffer: [512:0]u16 = undefined;
 
+    // draw focus
     if (focused_client) |idx| {
         const client = clients.items[idx];
-        var title_buffer: [512:0]u16 = undefined;
         const title_len = @intCast(usize, wam.GetWindowTextW(client.hwnd, &title_buffer, title_buffer.len));
         const title = title_buffer[0..title_len :0];
-        //checkLastError("Could not get window text");
         drawText(title);
     } else {
         const title = L("no window focused\x00");
         drawText(title);
     }
+
+    draw_context.x = desktop_width - 300;
+    draw_context.y = 0;
+    draw_context.w = 300;
+    draw_context.h = bar.h;
+
+    const time = std.time.timestamp();
+    const epoch_seconds = std.time.epoch.EpochSeconds{
+        .secs = @intCast(u64, time),
+    };
+    const day_seconds = epoch_seconds.getDaySeconds();
+    const hour = day_seconds.getHoursIntoDay();
+    const minute = day_seconds.getMinutesIntoHour();
+    const second = day_seconds.getSecondsIntoMinute();
+
+    const time_u8 = std.fmt.allocPrint(ally, "{:0>2}:{:0>2}:{:0>2}\x00", .{
+        hour,
+        minute,
+        second,
+    }) catch {
+        return;
+    };
+    defer ally.free(time_u8);
+    const time_u16 = std.unicode.utf8ToUtf16LeWithNull(ally, time_u8) catch {
+        return;
+    };
+    defer ally.free(time_u16);
+    drawText(time_u16);
 }
 
 fn writeTitleToBuffer(client: *const Client, buffer: [:0]u16) [:0]u16 {
@@ -661,11 +689,6 @@ fn writeTitleToBuffer(client: *const Client, buffer: [:0]u16) [:0]u16 {
 }
 
 fn drawText(text: [:0]const u16) void {
-    draw_context.x = 0;
-    draw_context.y = 0;
-    draw_context.w = desktop_width;
-    draw_context.h = bar.h;
-
     var r = RECT{
         .left = draw_context.x,
         .top = draw_context.y,
@@ -777,6 +800,9 @@ fn unmanage(client: *Client) void {
     //focused_client = null;
     _ = stack.orderedRemove(stack_idx);
     _ = clients.orderedRemove(client_idx);
+    if (focused_client != null and focused_client.? >= client_idx and focused_client.? != 0) {
+        focused_client.? -= 1;
+    }
     dumpState();
     focus(focused_client);
 }
@@ -841,7 +867,6 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                     if (std.meta.stringToEnum(Direction, bind.arg)) |direction| {
                         const next_workspace = lookupWorkspace(direction);
                         changeWorkspace(next_workspace);
-                        drawBar();
                     }
                 } else if (std.mem.eql(u8, bind.action, "move")) {
                     if (std.meta.stringToEnum(Direction, bind.arg)) |direction| {
@@ -850,7 +875,6 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                         moveToWorkspace(next_workspace) catch |err| {
                             print("Unable to move to workspace: {s}\n", .{err});
                         };
-                        drawBar();
                     }
                 } else if (std.mem.eql(u8, bind.action, "cycle")) {
                     if (std.meta.stringToEnum(Cycle, bind.arg)) |cycle| {
@@ -862,7 +886,6 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                                 focusNext();
                             },
                         }
-                        drawBar();
                     }
                 } else if (std.mem.eql(u8, bind.action, "maximize")) {
                     if (focused_client) |idx| {
@@ -907,10 +930,11 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                             }
                         }
                     },
-                    wam.HSHELL_WINDOWACTIVATED => {},
+                    wam.HSHELL_WINDOWACTIVATED => {
+                        //TODO: this
+                    },
                     else => {},
                 }
-                drawBar();
             } else {
                 return wam.DefWindowProcW(hwnd, msg, wparam, lparam);
             }
@@ -1006,7 +1030,7 @@ fn initBar(h_instance: HINSTANCE) void {
     //check(font != null, "Unable to get font");
 
     _ = wam.PostMessage(bar.hwnd, wam.WM_PAINT, 0, 0);
-    const clock_interval = 10_000;
+    const clock_interval = 1_000;
     _ = wam.SetTimer(bar.hwnd, 1, clock_interval, null);
 }
 
