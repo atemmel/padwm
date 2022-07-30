@@ -1,6 +1,13 @@
 const std = @import("std");
 const win32 = @import("win32");
 const binding = @import("binding.zig");
+const types = @import("types.zig");
+const KeyBind = types.KeyBind;
+const Workspace = types.Workspace;
+const Direction = types.Direction;
+const Cycle = types.Cycle;
+const Client = @import("client.zig").Client;
+const setHwndVisibility = @import("client.zig").setHwndVisibility;
 const windows = std.os.windows;
 const gdi = win32.graphics.gdi;
 const wam = win32.ui.windows_and_messaging;
@@ -28,26 +35,6 @@ const L = std.unicode.utf8ToUtf16LeStringLiteral;
 const TITLE = "padwm";
 const WTITLE = L(TITLE);
 
-const KeyBind = struct {
-    key: u32,
-    extraMod: u32,
-    action: []const u8,
-    arg: []const u8,
-
-    const InitOptions = struct {
-        mod: kbm.HOT_KEY_MODIFIERS = @intToEnum(kbm.HOT_KEY_MODIFIERS, 0),
-    };
-
-    fn init(key: kbm.VIRTUAL_KEY, action: []const u8, arg: []const u8, opt: InitOptions) KeyBind {
-        return KeyBind{
-            .key = @enumToInt(key),
-            .extraMod = @enumToInt(opt.mod),
-            .action = action,
-            .arg = arg,
-        };
-    }
-};
-
 const modifier = kbm.HOT_KEY_MODIFIERS.ALT;
 
 const binds = [_]KeyBind{
@@ -72,104 +59,6 @@ const binds = [_]KeyBind{
 
     // toggle maximized
     KeyBind.init(kbm.VK_M, "maximize", "", .{}),
-};
-
-const Client = struct {
-    hwnd: HWND,
-    parent: ?HWND,
-    root: HWND,
-    isCloaked: bool,
-    workspace: Workspace,
-    old_x: i32 = 0,
-    old_y: i32 = 0,
-    old_w: i32 = 0,
-    old_h: i32 = 0,
-    maximized: bool = false,
-    still_lives: bool = false,
-
-    pub fn resize(self: *Client, x: i32, y: i32, w: i32, h: i32) void {
-        var rect = std.mem.zeroes(RECT);
-        _ = wam.GetWindowRect(self.hwnd, &rect);
-        self.old_x = rect.left;
-        self.old_y = rect.top;
-        self.old_w = rect.right - rect.left;
-        self.old_h = rect.bottom - rect.top;
-        self.resizeKeepingCoords(x, y, w, h);
-    }
-
-    pub fn resizeKeepingCoords(self: *Client, x: i32, y: i32, w: i32, h: i32) void {
-        _ = wam.SetWindowPos(self.hwnd, null, x, y, w, h, wam.SWP_NOACTIVATE);
-    }
-
-    pub fn disallowMinimize(self: *const Client) void {
-        const long_styles = wam.GetWindowLongW(self.hwnd, wam.GWL_STYLE) & ~@intCast(i32, @enumToInt(wam.WS_MINIMIZEBOX));
-        _ = wam.SetWindowLongW(self.hwnd, wam.GWL_STYLE, long_styles);
-    }
-
-    pub fn allowMinimize(self: *Client) void {
-        const long_styles = wam.GetWindowLongW(self.hwnd, wam.GWL_STYLE) | @intCast(i32, @enumToInt(wam.WS_MINIMIZEBOX));
-        _ = wam.SetWindowLongW(self.hwnd, wam.GWL_STYLE, long_styles);
-    }
-
-    pub fn restore(self: *Client) void {
-        const placement = self.getPlacement();
-        const flag = switch (placement.showCmd) {
-            wam.SW_SHOWMAXIMIZED => wam.SW_SHOWMAXIMIZED,
-            wam.SW_SHOWMINIMIZED => wam.SW_RESTORE,
-            else => wam.SW_NORMAL,
-        };
-        self.setWindowFlag(flag);
-    }
-
-    pub fn maximize(self: *Client) void {
-        // must set window state before setting flag
-        self.resize(desktop_x, desktop_y, desktop_width, desktop_height);
-        self.setWindowFlag(wam.SW_SHOWMAXIMIZED);
-    }
-
-    pub fn unMaximize(self: *Client) void {
-        // must set normal before resetting window state
-        self.setWindowFlag(wam.SW_NORMAL);
-        self.resize(self.old_x, self.old_y, self.old_w, self.old_h);
-    }
-
-    fn setWindowFlag(self: *Client, flag: wam.SHOW_WINDOW_CMD) void {
-        const hwnd = self.hwnd;
-        _ = wam.ShowWindow(hwnd, flag);
-    }
-
-    fn getPlacement(self: *Client) wam.WINDOWPLACEMENT {
-        const hwnd = self.hwnd;
-        var placement = std.mem.zeroes(wam.WINDOWPLACEMENT);
-        placement.length = @sizeOf(@TypeOf(placement));
-        _ = wam.GetWindowPlacement(hwnd, &placement);
-        return placement;
-    }
-
-    pub fn toggleMaximized(self: *Client) void {
-        if (self.maximized) {
-            self.unMaximize();
-        } else {
-            self.maximize();
-        }
-        self.maximized = !self.maximized;
-    }
-
-    fn setVisibility(self: *Client, visible: bool) void {
-        // this sends HSHELL_WINDOWDESTROYED for some reason
-        setHwndVisibility(self.hwnd, visible);
-        if (!visible) {
-            // make a note that we only meant to hide it
-            self.still_lives = true;
-        }
-
-        //if (visible) {
-        //const offset_y = -(self.old_y + self.old_h) + bar.h;
-        //self.resizeKeepingCoords(self.old_x, offset_y, self.old_w, self.old_h);
-        //} else {
-        //self.resizeKeepingCoords(self.old_x, self.old_y, self.old_w, self.old_h);
-        //}
-    }
 };
 
 const Clients = std.ArrayList(Client);
@@ -201,28 +90,6 @@ const DrawContext = struct {
 
 var bar: Bar = undefined;
 var draw_context: DrawContext = undefined;
-
-const Workspace = enum(u8) {
-    center,
-    west,
-    east,
-    north,
-    south,
-    _,
-};
-
-const Direction = enum(u8) {
-    left,
-    right,
-    up,
-    down,
-    _,
-};
-
-const Cycle = enum(u8) {
-    backwards,
-    forwards,
-};
 
 const WorkspaceStack = std.ArrayList(usize);
 var workspace_stacks: [5]WorkspaceStack = .{
@@ -406,11 +273,6 @@ fn prepareFocusCloseClient() void {
     }
 
     const stack_idx = maybe_stack_idx.?;
-    //if (stack_idx < stack.len - 1) {
-    //focused_client = stack[stack_idx + 1];
-    //} else {
-    //focused_client = stack[stack.len - 1];
-    //}
     if (stack_idx > 0) {
         focused_client = stack[stack_idx - 1];
     } else {
@@ -496,27 +358,6 @@ fn findClient(hwnd: ?HWND) ?*Client {
         }
     }
     return null;
-}
-
-fn setHwndVisibility(hwnd: HWND, visible: bool) void {
-    const i_visible = @boolToInt(visible);
-    const i_hide = @boolToInt(!visible);
-    _ = wam.SetWindowPos(
-        hwnd,
-        null,
-        0,
-        0,
-        0,
-        0,
-        wam.SET_WINDOW_POS_FLAGS.initFlags(.{
-            .NOACTIVATE = 1,
-            .NOMOVE = 1,
-            .NOSIZE = 1,
-            .NOZORDER = 1,
-            .SHOWWINDOW = i_visible,
-            .HIDEWINDOW = i_hide,
-        }),
-    );
 }
 
 fn shouldManage(hwnd: HWND) bool {
@@ -891,7 +732,12 @@ fn wndProc(hwnd: HWND, msg: c_uint, wparam: WPARAM, lparam: LPARAM) callconv(.C)
                     if (focused_client) |idx| {
                         var client = &clients.items[idx];
                         print("Toggling maximized for {}\n", .{idx});
-                        client.toggleMaximized();
+                        client.toggleMaximized(
+                            desktop_x,
+                            desktop_y,
+                            desktop_width,
+                            desktop_height,
+                        );
                     }
                 }
             }
