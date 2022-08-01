@@ -66,7 +66,8 @@ pub const Wm = struct {
 
     active_workspace: Workspace = Workspace.center,
 
-    pub fn init(wm: *Wm, ally: std.mem.Allocator) void {
+    pub fn init(ally: std.mem.Allocator) Wm {
+        var wm: Wm = .{};
         wm.ally = ally;
         wm.clients = Clients.init(ally);
         wm.running = true;
@@ -74,6 +75,7 @@ pub const Wm = struct {
         for (wm.workspace_stacks) |*stack| {
             stack.* = WorkspaceStack.init(ally);
         }
+        return wm;
     }
 
     pub fn deinit(self: *Wm) void {
@@ -481,6 +483,10 @@ pub const Wm = struct {
         self.drawText(time_u16);
     }
 
+    pub fn getStack(self: *Wm, ws: Workspace) *WorkspaceStack {
+        return &self.workspace_stacks[@enumToInt(ws)];
+    }
+
     fn writeTitleToBuffer(client: *const Client, buffer: [:0]u16) [:0]u16 {
         const hwnd = client.hwnd;
         const buffer_len = @intCast(i32, buffer.len);
@@ -527,6 +533,17 @@ pub const Wm = struct {
         _ = gdi.DrawTextW(draw_context.hdc, text, @intCast(i32, text.len), &r, fmt);
     }
 
+    pub fn addClient(self: *Wm, client: Client) void {
+        const stack = &self.workspace_stacks[@enumToInt(self.active_workspace)];
+        const client_idx = self.clients.items.len;
+        self.clients.append(client) catch {
+            @panic("Unable to allocate memory for new client");
+        };
+        stack.append(client_idx) catch {
+            @panic("Unable to allocate memory for stack");
+        };
+    }
+
     pub fn manage(self: *Wm, hwnd: HWND) void {
         if (self.findClient(hwnd)) |_| {
             return;
@@ -547,14 +564,8 @@ pub const Wm = struct {
             .workspace = self.active_workspace,
         };
 
-        const stack = &self.workspace_stacks[@enumToInt(self.active_workspace)];
         const client_idx = self.clients.items.len;
-        self.clients.append(client) catch {
-            @panic("Unable to allocate memory for new client");
-        };
-        stack.append(client_idx) catch {
-            @panic("Unable to allocate memory for stack");
-        };
+        self.addClient(client);
 
         client.disallowMinimize();
         client.restore();
@@ -608,3 +619,25 @@ pub const Wm = struct {
         self.focus(self.focused_client);
     }
 };
+
+const expect = std.testing.expect;
+const expectEqualSlices = std.testing.expectEqualSlices;
+
+const test_clients = [_]Client{
+    .{ .hwnd = @intToPtr(HWND, 1), .parent = @intToPtr(HWND, 1), .root = @intToPtr(HWND, 1), .isCloaked = false, .workspace = .center },
+    .{ .hwnd = @intToPtr(HWND, 2), .parent = @intToPtr(HWND, 2), .root = @intToPtr(HWND, 1), .isCloaked = false, .workspace = .center },
+    .{ .hwnd = @intToPtr(HWND, 3), .parent = @intToPtr(HWND, 3), .root = @intToPtr(HWND, 1), .isCloaked = false, .workspace = .center },
+};
+
+test "wm add clients" {
+    var ally = std.testing.allocator;
+    var wm = Wm.init(ally);
+    defer wm.deinit();
+
+    for (test_clients) |*client| {
+        wm.addClient(client.*);
+    }
+
+    const stack = wm.getStack(.center);
+    try expectEqualSlices(usize, stack.items, &[_]usize{ 0, 1, 2 });
+}

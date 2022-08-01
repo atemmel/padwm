@@ -238,8 +238,6 @@ fn init(h_instance: HINSTANCE) void {
 
     var wmhwnd = maybe_wmhwnd.?;
 
-    wm.init(ally);
-
     // collect all active windows
     _ = wam.EnumWindows(enumWndProc, 0);
     wm.focusBottom();
@@ -355,7 +353,7 @@ pub fn wWinMain(h_instance_param: windows.HINSTANCE, _: ?windows.HINSTANCE, _: [
     _ = h_instance_param;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     ally = gpa.allocator();
-
+    wm = Wm.init(ally);
     defer {
         wm.deinit();
         std.debug.assert(!gpa.deinit());
@@ -369,4 +367,8 @@ pub fn wWinMain(h_instance_param: windows.HINSTANCE, _: ?windows.HINSTANCE, _: [
         _ = wam.DispatchMessage(&msg);
     }
     return @intCast(c_int, msg.wParam);
+}
+
+comptime {
+    _ = @import("wm.zig");
 }
