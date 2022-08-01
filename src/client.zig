@@ -1,11 +1,14 @@
 const std = @import("std");
 const win32 = @import("win32");
+const binding = @import("binding.zig");
 const Workspace = @import("types.zig").Workspace;
 const gdi = win32.graphics.gdi;
 const wam = win32.ui.windows_and_messaging;
 const foundation = win32.foundation;
 const HWND = foundation.HWND;
 const RECT = foundation.RECT;
+
+const setHwndVisibility = binding.setHwndVisibility;
 
 pub const Client = struct {
     hwnd: HWND,
@@ -97,24 +100,3 @@ pub const Client = struct {
         }
     }
 };
-
-pub fn setHwndVisibility(hwnd: HWND, visible: bool) void {
-    const i_visible = @boolToInt(visible);
-    const i_hide = @boolToInt(!visible);
-    _ = wam.SetWindowPos(
-        hwnd,
-        null,
-        0,
-        0,
-        0,
-        0,
-        wam.SET_WINDOW_POS_FLAGS.initFlags(.{
-            .NOACTIVATE = 1,
-            .NOMOVE = 1,
-            .NOSIZE = 1,
-            .NOZORDER = 1,
-            .SHOWWINDOW = i_visible,
-            .HIDEWINDOW = i_hide,
-        }),
-    );
-}

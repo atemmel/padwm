@@ -42,3 +42,18 @@ pub const KeyBind = struct {
         };
     }
 };
+
+pub fn lookupWorkspace(from: Workspace, dir: Direction) Workspace {
+    const workspace_jump_table = [5][4]Workspace{
+        // Direction: left            right           up               down               // Destination:
+        [_]Workspace{ Workspace.west, Workspace.east, Workspace.north, Workspace.south }, // center
+        [_]Workspace{ Workspace.east, Workspace.center, Workspace.north, Workspace.south }, // west
+        [_]Workspace{ Workspace.center, Workspace.west, Workspace.north, Workspace.south }, // east
+        [_]Workspace{ Workspace.west, Workspace.east, Workspace.south, Workspace.center }, // north
+        [_]Workspace{ Workspace.west, Workspace.east, Workspace.center, Workspace.north }, // south
+    };
+
+    const i = @enumToInt(from);
+    const j = @enumToInt(dir);
+    return workspace_jump_table[i][j];
+}
