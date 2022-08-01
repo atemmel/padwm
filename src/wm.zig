@@ -454,14 +454,14 @@ pub const Wm = struct {
             self.drawText(title);
         }
 
-        self.draw_context.x = self.desktop_width - 300;
+        self.draw_context.x = self.desktop_width - 100;
         self.draw_context.y = 0;
-        self.draw_context.w = 300;
+        self.draw_context.w = 100;
         self.draw_context.h = bar.h;
 
         const time = std.time.timestamp();
         const epoch_seconds = std.time.epoch.EpochSeconds{
-            .secs = @intCast(u64, time),
+            .secs = @intCast(u64, time) + 2 * std.time.s_per_hour,
         };
         const day_seconds = epoch_seconds.getDaySeconds();
         const hour = day_seconds.getHoursIntoDay();
